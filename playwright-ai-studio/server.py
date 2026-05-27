@@ -280,7 +280,27 @@ async def promote_healed(golden_id: str, body: PromoteGoldenRequest):
     golden["healCount"] = golden.get("healCount", 0) + 1
     golden["lastHealed"] = ts_now()
     save_json(GOLDEN_DIR, golden_id, golden)
-    return golden
+
+    # ── Auto-trigger GitHub Actions to test the healed golden ──────────────────
+    # This ensures the healed code is tested with the updated golden file
+    workflow_result = {"status": "skipped", "message": "GitHub workflow not configured"}
+    try:
+        print(f"[promote] Auto-triggering workflow for healed golden: {golden_id}")
+        workflow_result = dispatch_github_workflow({"golden_ids": golden_id})
+        print(f"[promote] Workflow triggered successfully: {workflow_result.get('message')}")
+    except HTTPException as e:
+        # Workflow dispatch failed but golden was saved successfully
+        print(f"[promote] Warning: Could not trigger workflow: {e.detail}")
+        workflow_result = {"status": "failed", "message": str(e.detail)}
+    except Exception as e:
+        print(f"[promote] Unexpected error triggering workflow: {e}")
+        workflow_result = {"status": "failed", "message": str(e)}
+
+    return {
+        "golden": golden,
+        "workflowTriggered": workflow_result.get("status") == "success",
+        "workflowMessage": workflow_result.get("message", "Unknown"),
+    }
 
 # ─ GitHub workflow dispatch helpers ─────────────────────────────────────────
 def parse_github_remote(url: str):
