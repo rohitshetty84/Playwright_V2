@@ -149,7 +149,7 @@ jobs:
         run: npx playwright install --with-deps msedge chromium
 
       - name: Run Playwright
-        run: npx playwright test --reporter=list,html,json,junit
+        run: npx playwright test
         continue-on-error: true
 
       - name: Debug - Check what was created
