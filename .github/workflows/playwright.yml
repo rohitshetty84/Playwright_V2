@@ -170,6 +170,46 @@ jobs:
             echo "❌ junit.xml not found"
           fi
 
+      - name: Debug - Content of test-results directory
+        if: always()
+        run: |
+          echo "=== Files in test-results/ ==="
+          ls -la test-results/ 2>/dev/null || echo "test-results/ doesn't exist"
+
+          echo ""
+          echo "=== All JSON files in repo ==="
+          find . -name "*.json" -type f 2>/dev/null | head -20
+
+          echo ""
+          echo "=== All XML files in repo ==="
+          find . -name "*.xml" -type f 2>/dev/null | head -20
+
+      - name: Debug - Playwright version and config check
+        if: always()
+        run: |
+          echo "=== Playwright version ==="
+          npm list @playwright/test 2>/dev/null | grep playwright || echo "Not found"
+
+          echo ""
+          echo "=== Config reporters section ==="
+          grep -A 10 "reporter:" playwright.config.ts || echo "Config not found"
+
+          echo ""
+          echo "=== Check if playwright.config.ts exists ==="
+          ls -la playwright.config.ts || echo "Not found"
+
+          echo ""
+          echo "=== Looking for results.json ==="
+          find . -name "results.json" -type f 2>/dev/null || echo "Not found"
+
+          echo ""
+          echo "=== Checking junit.xml ==="
+          if [ -f junit.xml ]; then
+            echo "✓ junit.xml found, size: $(wc -c < junit.xml) bytes"
+          else
+            echo "❌ junit.xml not found"
+          fi
+
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v6
