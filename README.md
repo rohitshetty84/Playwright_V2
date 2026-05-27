@@ -64,7 +64,7 @@ The workflow definition lives in `.github/workflows/playwright.yml`. It has thre
 
 | Job | What it does |
 |-----|--------------|
-| `prepare-goldens` | Reads `golden/*.json` and writes each `code` field out as `tests/<name>.spec.ts`. Uploads `tests/` as an artifact. |
+| `prepare-goldens` | Reads `playwright-ai-studio/golden/*.json` and writes each `code` field out as `tests/<name>.spec.ts`. Uploads `tests/` as an artifact. |
 | `playwright-test` | `npm ci` + `npx playwright install --with-deps msedge` + `npx playwright test`. Emits HTML report, JUnit, and `results.json` as artifacts. |
 | `report-runs` | POSTs the run summary back to a deployed Studio at `$PLAYWRIGHT_AI_STUDIO_URL/api/runs`. Skipped automatically if that **variable** is unset. |
 

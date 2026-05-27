@@ -64,15 +64,17 @@ jobs:
 
       - name: Export golden JSON → tests/*.spec.ts
         # Precedence: workflow_dispatch input > GOLDEN_IDS repo variable > "" (all)
+        # Goldens live under playwright-ai-studio/golden/, not the repo root.
         env:
           GOLDEN_IDS: ${{ github.event.inputs.golden_ids || vars.GOLDEN_IDS || '' }}
+          GOLDEN_DIR: playwright-ai-studio/golden
         run: |
           if [ -n "$GOLDEN_IDS" ]; then
             echo "Selective run — IDs: $GOLDEN_IDS"
-            python ci/export_goldens.py --from golden --to tests --ids "$GOLDEN_IDS"
+            python ci/export_goldens.py --from "$GOLDEN_DIR" --to tests --ids "$GOLDEN_IDS"
           else
             echo "No filter set — exporting every golden"
-            python ci/export_goldens.py --from golden --to tests
+            python ci/export_goldens.py --from "$GOLDEN_DIR" --to tests
           fi
 
       - name: List exported specs
