@@ -1,0 +1,45 @@
+{
+  "id": "seed-g1",
+  "name": "DELETED_onboarding.spec.ts",
+  "description": "ARCHIVED: SF Onboarding — removed per user request",
+  "code": "import { test, expect, Page } from '@playwright/test';\nimport dotenv from 'dotenv';\nimport { CANDIDATES } from './test-data';\ndotenv.config();\n\nconst SF_HOME = 'https://performancemanager8.successfactors.com/sf/start#/';\nconst SF_SSO_URL = process.env.SF_URL ?? 'https://performancemanager8.successfactors.com/sf/login?company=C0000161430T2&loginMethod=SSO-T2';\n\ntest.beforeAll(() => {\n  if (CANDIDATES.length === 0) throw new Error('CANDIDATES array is empty.');\n});\n\n// [AI-SYNTHESIZED] .first() applied \u2014 two Home buttons exist in the shell bar\nasync function login(page: Page) {\n  await page.goto(SF_HOME, { waitUntil: 'networkidle' });\n  if (/Home - SAP SuccessFactors/i.test(await page.title())) return;\n  await page.goto(SF_SSO_URL, { waitUntil: 'networkidle' });\n  await expect(page).toHaveTitle(/Home - SAP SuccessFactors/, { timeout: 60_000 });\n}\n\nasync function navigateToOnboarding(page: Page) {\n  await page.getByRole('button', { name: 'Home', exact: true }).first().click();\n  await page.getByRole('link', { name: 'Onboarding' }).click();\n  await expect(page).toHaveTitle(/Onboarding Dashboard/, { timeout: 30_000 });\n}\n\nasync function searchCandidate(page: Page, name: string) {\n  const input = page.getByRole('textbox', { name: 'New Recruit:' });\n  await input.click();\n  await input.pressSequentially(name, { delay: 80 });\n  await expect(page.getByRole('option', { name: new RegExp(name, 'i') }).first()).toBeVisible({ timeout: 15_000 });\n  await page.getByRole('option', { name: new RegExp(name, 'i') }).first().click();\n  await page.getByRole('button', { name: 'Go', exact: true }).click();\n  await expect(page.getByRole('heading', { name: /New Recruits \\(1\\)/ })).toBeVisible({ timeout: 20_000 });\n}\n\nfor (const candidate of CANDIDATES) {\n  test.describe(`Candidate: ${candidate.name}`, () => {\n    test.beforeEach(async ({ page }) => { await login(page); });\n\n    test('TC-04 to TC-11 [Path A]: Full onboarding update and submit', async ({ page }) => {\n      if (candidate.path !== 'A') { test.skip(); return; }\n      await navigateToOnboarding(page);\n      await searchCandidate(page, candidate.name);\n      // ... Path A steps (TC-04 through TC-11)\n      console.log(`[${candidate.name}] \u2705 Path A complete`);\n    });\n\n    test('TC-Nudge [Path B]: Nudge candidate when status is not completed', async ({ page }) => {\n      if (candidate.path !== 'B') { test.skip(); return; }\n      await navigateToOnboarding(page);\n      await searchCandidate(page, candidate.name);\n      // [AI-SYNTHESIZED] .or() fallback chain \u2014 Nudge button varies across SF versions\n      const nudgeButton = page.getByRole('button', { name: /nudge/i })\n        .or(page.getByRole('link', { name: /nudge/i }))\n        .or(page.locator('[title*=\"Nudge\"], [aria-label*=\"Nudge\"]'))\n        .first();\n      await expect(nudgeButton).toBeVisible({ timeout: 15_000 });\n      await nudgeButton.click();\n      console.log(`[${candidate.name}] \u2705 Path B complete`);\n    });\n  });\n}",
+  "browsers": [
+    "msedge"
+  ],
+  "analysis": {
+    "steps": [
+      "Login via SSO",
+      "Navigate to Onboarding",
+      "Search candidate",
+      "Select queue",
+      "Filter & open profile",
+      "Update National ID",
+      "Set email Is Primary = No",
+      "Set Work Schedule + Contract End Date",
+      "Submit"
+    ],
+    "selectors": [
+      "getByRole('button', { name: 'Home' }).first()",
+      "getByRole('textbox', { name: 'New Recruit:' })",
+      "getByRole('combobox', { name: 'Work Schedule' })",
+      "getByRole('button', { name: /nudge/i })"
+    ],
+    "risks": [
+      "Two Home buttons in shell bar",
+      "Dynamic nudge button selector",
+      "Network idle timing on SF pages",
+      "Work Schedule combobox arrow targeting"
+    ],
+    "healingStrategies": [
+      ".first() on ambiguous role matches",
+      ".or() fallback chain for Nudge",
+      "waitForLoadState('networkidle') after queue select",
+      "regex patterns for version-agnostic step labels"
+    ]
+  },
+  "createdAt": "2026-05-22 09:14",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 9
+}
