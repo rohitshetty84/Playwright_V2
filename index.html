@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Playwright AI Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #020817;
+    --surface:   #060f20;
+    --surface2:  #0a1628;
+    --border:    #0f2040;
+    --border2:   #162840;
+    --accent:    #1d6bf3;
+    --accent2:   #0ea5e9;
+    --text:      #cbd5e1;
+    --text2:     #64748b;
+    --text3:     #94a3b8;
+    --pass-bg:   #021a0e; --pass-b: #0d4025; --pass-t: #34d399;
+    --fail-bg:   #1a0202; --fail-b: #401010; --fail-t: #f87171;
+    --warn-bg:   #1a1402; --warn-b: #40340a; --warn-t: #fbbf24;
+    --heal-bg:   #0d0a1a; --heal-b: #2a1f50; --heal-t: #a78bfa;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Syne', sans-serif; font-size: 14px; }
+
+  /* ── Layout ── */
+  .shell { display: grid; grid-template-rows: 56px 1fr; height: 100vh; }
+
+  .topbar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 14px; padding: 0 24px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo-icon { width: 30px; height: 30px; border-radius: 7px; background: linear-gradient(135deg, #1d6bf3, #7c3aed); display:grid; place-items:center; font-size:15px; flex-shrink:0; }
+  .logo-name { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; color: #f1f5f9; }
+  .logo-sub  { font-size: 10px; color: var(--text2); font-family: 'JetBrains Mono', monospace; letter-spacing: 0.06em; text-transform: uppercase; margin-top: 1px; }
+  .topbar-badges { margin-left: auto; display: flex; gap: 8px; }
+
+  .body { display: grid; grid-template-columns: 200px 1fr; overflow: hidden; }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 16px 10px;
+    display: flex; flex-direction: column; gap: 4px;
+    overflow-y: auto;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 8px; cursor: pointer;
+    font-size: 13px; font-weight: 600; color: var(--text2);
+    border: 1px solid transparent; transition: all 0.15s; user-select: none;
+  }
+  .nav-item:hover { background: var(--surface2); color: var(--text3); }
+  .nav-item.active { background: #0b1e3d; border-color: #1d3a6f; color: #93c5fd; }
+  .nav-item .icon { font-size: 15px; width: 20px; text-align: center; }
+  .nav-badge { margin-left: auto; background: var(--border2); color: var(--text2); border-radius: 10px; padding: 1px 7px; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+  .nav-badge.alert { background: var(--fail-bg); color: var(--fail-t); border: 1px solid var(--fail-b); }
+
+  /* ── Main ── */
+  .main { overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+
+  /* ── Pane ── */
+  .pane { display: none; flex-direction: column; gap: 18px; }
+  .pane.active { display: flex; }
+
+  /* ── Cards ── */
+  .card { background: var(--surface2); border: 1px solid var(--border2); border-radius: 12px; padding: 18px; }
+  .card-title { font-size: 13px; font-weight: 700; color: #e2e8f0; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+
+  /* ── Form controls ── */
+  label { font-size: 11px; font-weight: 700; color: var(--text2); letter-spacing: 0.06em; text-transform: uppercase; display: block; margin-bottom: 6px; }
+  textarea, input, select {
+    width: 100%; background: var(--bg); border: 1px solid var(--border2); border-radius: 8px;
+    padding: 10px 12px; color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    outline: none; resize: vertical; transition: border-color 0.15s;
+  }
+  textarea:focus, input:focus, select:focus { border-color: var(--accent); }
+  select { resize: none; cursor: pointer; }
+
+  /* ── Buttons ── */
+  .btn { display: inline-flex; align-items: center; gap: 7px; padding: 9px 18px; border: none; border-radius: 8px; font-family: 'Syne', sans-serif; font-weight: 700; font-size: 13px; cursor: pointer; transition: opacity 0.15s; }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: linear-gradient(135deg, #1d6bf3, #1558d0); color: #fff; }
+  .btn-success { background: linear-gradient(135deg, #059669, #047857); color: #fff; }
+  .btn-warn    { background: linear-gradient(135deg, #d97706, #b45309); color: #fff; }
+  .btn-ghost   { background: var(--surface); border: 1px solid var(--border2); color: var(--text2); }
+  .btn-sm      { padding: 6px 12px; font-size: 12px; }
+
+  /* ── Badge ── */
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-family: 'JetBrains Mono', monospace; font-weight: 600; border: 1px solid; }
+  .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; }
+  .badge-pass { background: var(--pass-bg); border-color: var(--pass-b); color: var(--pass-t); }
+  .badge-fail { background: var(--fail-bg); border-color: var(--fail-b); color: var(--fail-t); }
+  .badge-warn { background: var(--warn-bg); border-color: var(--warn-b); color: var(--warn-t); }
+  .badge-heal { background: var(--heal-bg); border-color: var(--heal-b); color: var(--heal-t); }
+  .badge-info { background: #030f2b; border-color: #0d2460; color: #60a5fa; }
+
+  /* ── Progress bar ── */
+  .progress-wrap { width: 100%; height: 4px; background: var(--border2); border-radius: 2px; overflow: hidden; }
+  .progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), #7c3aed); border-radius: 2px; transition: width 0.4s ease; }
+
+  /* ── Code block ── */
+  .code-wrap { border-radius: 8px; overflow: hidden; border: 1px solid var(--border2); }
+  .code-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .code-lang { font-size: 10px; color: var(--text2); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.06em; }
+  .code-copy { font-size: 11px; color: var(--text2); background: none; border: none; cursor: pointer; font-family: 'JetBrains Mono', monospace; transition: color 0.15s; }
+  .code-copy:hover { color: var(--pass-t); }
+  .code-body { background: #010810; padding: 14px 16px; max-height: 300px; overflow-y: auto; }
+  pre { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.75; color: #cdd6f4; white-space: pre-wrap; word-break: break-word; }
+
+  /* ── Diff ── */
+  .diff-line { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.8; padding: 1px 10px; white-space: pre; }
+  .diff-add { background: #012210; color: var(--pass-t); border-left: 3px solid var(--pass-t); }
+  .diff-rem { background: #1a0505; color: var(--fail-t); border-left: 3px solid var(--fail-t); }
+  .diff-ctx { color: var(--text2); border-left: 3px solid transparent; }
+
+  /* ── Analysis grid ── */
+  .analysis-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }
+  .analysis-cell { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .analysis-cell-title { font-size: 10px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 8px; font-weight: 700; }
+  .analysis-item { font-size: 11px; font-family: 'JetBrains Mono', monospace; margin-bottom: 4px; color: var(--text3); }
+
+  /* ── Golden / Run cards ── */
+  .golden-card, .run-card { background: var(--surface2); border: 1px solid var(--border2); border-radius: 10px; overflow: hidden; transition: border-color 0.15s; }
+  .golden-card:hover, .run-card:hover { border-color: #1d3a6f; }
+  .golden-header, .run-header { padding: 14px 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .golden-body, .run-body { border-top: 1px solid var(--border); padding: 14px 16px; display: none; }
+  .golden-body.open, .run-body.open { display: block; }
+  .golden-meta, .run-meta { display: flex; gap: 16px; font-size: 11px; color: var(--text2); font-family: 'JetBrains Mono', monospace; margin-top: 6px; }
+
+  /* ── Candidate row ── */
+  .cand-row { padding: 10px 12px; border-radius: 8px; border: 1px solid; margin-bottom: 8px; }
+  .cand-row.pass { border-color: var(--pass-b); background: var(--pass-bg); }
+  .cand-row.fail { border-color: var(--fail-b); background: var(--fail-bg); }
+  .cand-error { margin-top: 8px; padding: 8px 10px; background: #0d0202; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--fail-t); line-height: 1.6; }
+
+  /* ── Log console ── */
+  .log-console { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 160px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.8; }
+  .log-ok   { color: var(--pass-t); }
+  .log-info { color: var(--text3); }
+  .log-err  { color: var(--fail-t); }
+  .log-time { color: var(--text2); margin-right: 8px; }
+
+  /* ── Toast ── */
+  #toast { position: fixed; bottom: 24px; right: 24px; background: #0a1f3d; border: 1px solid #1d3a6f; color: #93c5fd; padding: 10px 18px; border-radius: 8px; font-size: 13px; font-family: 'JetBrains Mono', monospace; opacity: 0; transform: translateY(8px); transition: all 0.25s; pointer-events: none; z-index: 999; }
+  #toast.show { opacity: 1; transform: translateY(0); }
+
+  /* ── Locked notice ── */
+  .locked-notice { background: var(--warn-bg); border: 1px solid var(--warn-b); border-radius: 6px; padding: 8px 12px; font-size: 11px; color: var(--warn-t); font-family: 'JetBrains Mono', monospace; margin-top: 12px; }
+
+  /* ── Empty state ── */
+  .empty { text-align: center; padding: 48px 20px; color: var(--text2); font-size: 13px; font-family: 'JetBrains Mono', monospace; }
+
+  /* ── Flex utils ── */
+  .row   { display: flex; align-items: center; gap: 10px; }
+  .col   { display: flex; flex-direction: column; gap: 12px; }
+  .ml-auto { margin-left: auto; }
+  .mt-8  { margin-top: 8px; }
+  .mt-12 { margin-top: 12px; }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="logo-icon">⚡</div>
+    <div>
+      <div class="logo-name">Playwright AI Studio</div>
+      <div class="logo-sub">SAP SuccessFactors · Azure OpenAI</div>
+    </div>
+    <div class="topbar-badges">
+      <span class="badge badge-pass">Azure OpenAI ✓</span>
+      <span class="badge badge-info" id="badge-goldens">0 goldens</span>
+    </div>
+  </header>
+
+  <div class="body">
+    <!-- Sidebar nav -->
+    <nav class="sidebar">
+      <div class="nav-item active" data-tab="synthesize">
+        <span class="icon">✦</span> Synthesize
+      </div>
+      <div class="nav-item" data-tab="golden">
+        <span class="icon">📄</span> Golden Files
+        <span class="nav-badge" id="nav-golden-count">0</span>
+      </div>
+      <div class="nav-item" data-tab="runs">
+        <span class="icon">▶</span> Run History
+        <span class="nav-badge" id="nav-run-count">0</span>
+      </div>
+      <div class="nav-item" data-tab="heal">
+        <span class="icon">🔧</span> Auto-Heal
+        <span class="nav-badge alert" id="nav-fail-count" style="display:none"></span>
+      </div>
+    </nav>
+
+    <!-- Main content -->
+    <main class="main">
+
+      <!-- ═══════════════════════════ SYNTHESIZE ═══════════════════════════ -->
+      <div class="pane active" id="pane-synthesize">
+
+        <div class="card">
+          <div class="card-title">⚡ AI Test Synthesizer
+            <span style="font-size:11px;color:var(--text2);font-weight:400;margin-left:4px">Describe your test → AI writes the Playwright script → save as Golden</span>
+          </div>
+
+          <div id="synth-form" class="col">
+            <div>
+              <label>Test Case Description *</label>
+              <textarea id="synth-tc" rows="4" placeholder="e.g. SF Onboarding Path A — search candidate by name, update National ID, set email Is Primary = No, set Work Schedule + Contract End Date, submit form and verify redirect to /newhire"></textarea>
+            </div>
+            <div>
+              <label>Existing Script / Fragments (optional)</label>
+              <textarea id="synth-frag" rows="5" placeholder="Paste any existing Playwright helpers, selectors, or step comments…"></textarea>
+            </div>
+            <div id="synth-error" class="cand-error" style="display:none"></div>
+            <div class="row">
+              <button class="btn btn-primary" onclick="runSynthesize()">✦ Synthesize</button>
+              <button class="btn btn-ghost btn-sm" onclick="loadSample()">Load sample</button>
+            </div>
+          </div>
+
+          <!-- Progress -->
+          <div id="synth-progress" style="display:none" class="col mt-12">
+            <div class="progress-wrap"><div class="progress-bar" id="synth-prog-bar" style="width:0%"></div></div>
+            <div id="synth-prog-label" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent2)">Analysing…</div>
+          </div>
+        </div>
+
+        <!-- Analysis results -->
+        <div id="synth-analysis" class="card" style="display:none">
+          <div class="card-title">🔍 Analysis</div>
+          <div class="analysis-grid" id="analysis-grid"></div>
+        </div>
+
+        <!-- Generated code -->
+        <div id="synth-result" class="card" style="display:none">
+          <div class="card-title">Generated Script</div>
+          <div class="code-wrap">
+            <div class="code-header">
+              <span class="code-lang">typescript</span>
+              <button class="code-copy" onclick="copyCode('synth-code-pre')">copy</button>
+            </div>
+            <div class="code-body"><pre id="synth-code-pre"></pre></div>
+          </div>
+          <div class="row mt-12">
+            <input id="golden-name-input" placeholder="filename.spec.ts" style="flex:1" />
+            <button class="btn btn-success" onclick="saveGolden()">⬆ Save as Golden</button>
+            <button class="btn btn-ghost btn-sm" onclick="resetSynth()">✕</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ GOLDEN FILES ═══════════════════════════ -->
+      <div class="pane" id="pane-golden">
+        <div style="font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace">
+          Golden files are immutable references. Auto-healing only modifies them when explicitly triggered.
+        </div>
+        <div id="golden-list"></div>
+      </div>
+
+      <!-- ═══════════════════════════ RUN HISTORY ═══════════════════════════ -->
+      <div class="pane" id="pane-runs">
+        <div id="run-list"></div>
+      </div>
+
+      <!-- ═══════════════════════════ AUTO-HEAL ═══════════════════════════ -->
+      <div class="pane" id="pane-heal">
+
+        <div class="card" style="background:var(--warn-bg);border-color:var(--warn-b)">
+          <div class="card-title" style="color:var(--warn-t)">⚠ Auto-Heal is a deliberate action</div>
+          <p style="font-size:12px;color:var(--text3);font-family:'JetBrains Mono',monospace;line-height:1.7">
+            This analyses recent test failures, generates a healed script via Azure OpenAI, shows you the diff,
+            and only promotes to Golden after your explicit approval. The current Golden is never silently overwritten.
+          </p>
+        </div>
+
+        <div id="heal-failures" class="card" style="display:none">
+          <div class="card-title">Recent Failures</div>
+          <div id="heal-failure-list"></div>
+        </div>
+
+        <div id="heal-form" class="card">
+          <div class="card-title">🔧 Select Golden to Heal</div>
+          <div class="col">
+            <div>
+              <label>Golden File</label>
+              <select id="heal-golden-select"></select>
+            </div>
+            <button class="btn btn-warn" onclick="runHeal()">🔧 Run Auto-Heal</button>
+          </div>
+        </div>
+
+        <!-- Heal progress -->
+        <div id="heal-progress" class="card" style="display:none">
+          <div class="progress-wrap"><div class="progress-bar" id="heal-prog-bar" style="width:0%;background:linear-gradient(90deg,#d97706,#f59e0b)"></div></div>
+          <div class="log-console mt-8" id="heal-log"></div>
+        </div>
+
+        <!-- Heal result -->
+        <div id="heal-result" class="card" style="display:none">
+          <div class="card-title">Changes Made</div>
+          <div id="heal-changes" class="col" style="margin-bottom:14px"></div>
+
+          <div class="card-title mt-12">Healed Script</div>
+          <div class="code-wrap">
+            <div class="code-header">
+              <span class="code-lang">typescript</span>
+              <button class="code-copy" onclick="copyCode('heal-code-pre')">copy</button>
+            </div>
+            <div class="code-body"><pre id="heal-code-pre"></pre></div>
+          </div>
+          <div class="row mt-12">
+            <button class="btn btn-success" onclick="promoteHealed()">✓ Promote as New Golden</button>
+            <button class="btn btn-ghost btn-sm" onclick="resetHeal()">Discard</button>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let STATE = { goldens: [], runs: [], synthCode: '', synthAnalysis: {}, healGoldenId: '', healCode: '' };
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+async function boot() {
+  await Promise.all([fetchGoldens(), fetchRuns()]);
+  renderNav();
+}
+
+// ── API helpers ────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const r = await fetch('/api' + path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.statusText); }
+  return r.json();
+}
+
+async function fetchGoldens() {
+  STATE.goldens = await api('GET', '/goldens').catch(() => []);
+  renderGoldens();
+}
+async function fetchRuns() {
+  STATE.runs = await api('GET', '/runs').catch(() => []);
+  renderRuns();
+}
+
+// ── Nav ────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('pane-' + el.dataset.tab).classList.add('active');
+    if (el.dataset.tab === 'heal') populateHealSelects();
+  });
+});
+
+function renderNav() {
+  document.getElementById('nav-golden-count').textContent = STATE.goldens.length;
+  document.getElementById('badge-goldens').textContent = STATE.goldens.length + ' golden' + (STATE.goldens.length !== 1 ? 's' : '');
+  document.getElementById('nav-run-count').textContent = STATE.runs.length;
+  const fails = STATE.runs.flatMap(r => r.candidates.filter(c => c.status === 'fail')).length;
+  const fb = document.getElementById('nav-fail-count');
+  fb.style.display = fails > 0 ? '' : 'none';
+  fb.textContent = fails + ' fail' + (fails !== 1 ? 's' : '');
+}
+
+// ── Synthesize ─────────────────────────────────────────────────────────────
+function loadSample() {
+  document.getElementById('synth-tc').value = 'SF Onboarding Path A — search candidate by name in Manage Pending Recruits, update National ID field, set Personal email Is Primary = No, set Work Schedule dropdown and Contract End Date, click Submit and verify redirect to /newhire URL';
+  document.getElementById('synth-frag').value = `// Reference: login helper
+async function login(page) {
+  await page.goto(SF_HOME, { waitUntil: 'networkidle' });
+  if (/Home - SAP SuccessFactors/i.test(await page.title())) return;
+  await page.goto(SF_SSO_URL, { waitUntil: 'networkidle' });
+}
+// Two Home buttons exist — scope to .first()
+await page.getByRole('button', { name: 'Home', exact: true }).first().click();`;
+}
+
+function resetSynth() {
+  ['synth-analysis','synth-result','synth-progress'].forEach(id => document.getElementById(id).style.display = 'none');
+  document.getElementById('synth-form').style.display = '';
+  document.getElementById('synth-error').style.display = 'none';
+  STATE.synthCode = ''; STATE.synthAnalysis = {};
+}
+
+function setProgress(barId, labelId, pct, label) {
+  document.getElementById(barId).style.width = pct + '%';
+  if (labelId) document.getElementById(labelId).textContent = label || '';
+}
+
+async function runSynthesize() {
+  const tc = document.getElementById('synth-tc').value.trim();
+  const frag = document.getElementById('synth-frag').value.trim();
+  if (!tc) { showError('synth-error', 'Please describe the test case first.'); return; }
+  showError('synth-error', '');
+
+  document.getElementById('synth-form').style.display = 'none';
+  document.getElementById('synth-progress').style.display = '';
+  setProgress('synth-prog-bar', 'synth-prog-label', 10, '🔍 Analysing test structure…');
+
+  try {
+    // Step 1 — Analyse
+    const analysis = await api('POST', '/synthesize/analyse', { test_case: tc, script_fragment: frag });
+    STATE.synthAnalysis = analysis;
+    setProgress('synth-prog-bar', 'synth-prog-label', 45, '✦ Synthesizing Playwright TypeScript…');
+    renderAnalysis(analysis);
+    document.getElementById('synth-analysis').style.display = '';
+
+    // Step 2 — Generate
+    const { code } = await api('POST', '/synthesize/generate', { test_case: tc, script_fragment: frag });
+    STATE.synthCode = code;
+    setProgress('synth-prog-bar', 'synth-prog-label', 90, '✓ Script ready');
+
+    document.getElementById('synth-code-pre').innerHTML = highlight(code);
+    const slug = tc.split(' ').slice(0,3).join('-').toLowerCase().replace(/[^a-z0-9-]/g,'');
+    document.getElementById('golden-name-input').value = slug + '.spec.ts';
+
+    document.getElementById('synth-progress').style.display = 'none';
+    document.getElementById('synth-result').style.display = '';
+  } catch (e) {
+    showError('synth-error', e.message);
+    document.getElementById('synth-progress').style.display = 'none';
+    document.getElementById('synth-form').style.display = '';
+  }
+}
+
+function renderAnalysis(a) {
+  const grid = document.getElementById('analysis-grid');
+  grid.innerHTML = `
+    <div class="analysis-cell">
+      <div class="analysis-cell-title">Steps (${(a.steps||[]).length})</div>
+      ${(a.steps||[]).slice(0,6).map((s,i)=>`<div class="analysis-item"><span style="color:var(--accent);margin-right:6px">${i+1}.</span>${esc(s)}</div>`).join('')}
+    </div>
+    <div class="analysis-cell">
+      <div class="analysis-cell-title">Flakiness Risks</div>
+      ${(a.risks||[]).slice(0,5).map(r=>`<div class="analysis-item" style="color:var(--warn-t)">⚠ ${esc(r)}</div>`).join('')}
+    </div>
+    <div class="analysis-cell">
+      <div class="analysis-cell-title">Healing Applied</div>
+      ${(a.healingStrategies||[]).slice(0,5).map(h=>`<div class="analysis-item" style="color:var(--pass-t)">✓ ${esc(h)}</div>`).join('')}
+    </div>`;
+}
+
+async function saveGolden() {
+  const name = document.getElementById('golden-name-input').value.trim() || 'generated.spec.ts';
+  try {
+    const g = await api('POST', '/goldens', {
+      name, description: document.getElementById('synth-tc').value.slice(0,120),
+      code: STATE.synthCode, browsers: ['msedge'], analysis: STATE.synthAnalysis,
+    });
+    STATE.goldens.unshift(g);
+    renderGoldens(); renderNav();
+    toast('✓ Saved as Golden: ' + name);
+    resetSynth();
+    document.getElementById('synth-form').style.display = '';
+    switchTab('golden');
+  } catch(e) { toast('Error: ' + e.message); }
+}
+
+// ── Golden rendering ──────────────────────────────────────────────────────
+function renderGoldens() {
+  const el = document.getElementById('golden-list');
+  if (!STATE.goldens.length) { el.innerHTML = '<div class="empty">No golden files yet — synthesize one first.</div>'; return; }
+  el.innerHTML = STATE.goldens.map(g => `
+    <div class="golden-card" style="margin-bottom:12px">
+      <div class="golden-header" onclick="toggleBody(this)">
+        <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">
+          <span style="font-size:18px">📄</span>
+          <div style="min-width:0">
+            <div style="font-family:'JetBrains Mono',monospace;font-weight:600;font-size:13px;color:#e2e8f0">${esc(g.name)}</div>
+            <div style="font-size:11px;color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.description||'')}</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+          <span class="badge badge-pass">GOLDEN ✓</span>
+          ${g.healCount > 0 ? `<span class="badge badge-heal">healed ×${g.healCount}</span>` : ''}
+          <span style="color:var(--text2);font-size:12px">▼</span>
+        </div>
+      </div>
+      <div class="golden-meta" style="padding:0 16px 10px">
+        <span>🗓 ${g.createdAt}</span><span>🔢 ${g.steps||'?'} steps</span><span>🌐 ${(g.browsers||[]).join(', ')}</span>
+        ${g.healCount > 0 ? `<span>🔧 last healed ${g.lastHealed||''}</span>` : ''}
+      </div>
+      <div class="golden-body">
+        ${g.code ? codeBlock(g.code, 'golden-code-'+g.id) : '<div style="color:var(--text2);font-size:12px">Code not stored — re-synthesize to populate.</div>'}
+        <div class="locked-notice">🔒 Golden is locked. Go to Auto-Heal to modify.</div>
+      </div>
+    </div>`).join('');
+}
+
+// ── Run rendering ──────────────────────────────────────────────────────────
+function renderRuns() {
+  const el = document.getElementById('run-list');
+  if (!STATE.runs.length) { el.innerHTML = '<div class="empty">No test runs recorded yet.</div>'; return; }
+  el.innerHTML = STATE.runs.map(r => {
+    const pass = r.candidates.filter(c=>c.status==='pass').length;
+    const fail = r.candidates.filter(c=>c.status==='fail').length;
+    const ov = fail > 0 ? 'fail' : 'pass';
+    return `
+    <div class="run-card" style="margin-bottom:12px">
+      <div class="run-header" onclick="toggleBody(this)">
+        <div class="row" style="flex:1;gap:12px">
+          <span class="badge badge-${ov}">${ov.toUpperCase()}</span>
+          <div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#e2e8f0">${esc(r.goldenName)}</span>
+            <span style="font-size:11px;color:var(--text2);margin-left:10px">🌐 ${r.browser}</span>
+          </div>
+        </div>
+        <div class="row" style="gap:14px;flex-shrink:0">
+          <span style="font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace">🗓 ${r.runAt}</span>
+          <span style="font-size:11px;color:var(--pass-t);font-family:'JetBrains Mono',monospace">✓ ${pass}</span>
+          ${fail > 0 ? `<span style="font-size:11px;color:var(--fail-t);font-family:'JetBrains Mono',monospace">✗ ${fail}</span>` : ''}
+          <span style="color:var(--text2);font-size:12px">▼</span>
+        </div>
+      </div>
+      <div class="run-body">
+        ${r.candidates.map(c => `
+          <div class="cand-row ${c.status}">
+            <div class="row">
+              <span class="badge badge-${c.status}">${c.status.toUpperCase()}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:13px">${esc(c.name)}</span>
+              <span class="badge badge-info" style="font-size:10px">Path ${c.path}</span>
+              <span style="margin-left:auto;font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace">⏱ ${c.duration||'—'}</span>
+            </div>
+            ${c.error ? `<div class="cand-error">✗ ${esc(c.error)}</div>` : ''}
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+  renderNav();
+}
+
+// ── Auto-Heal ──────────────────────────────────────────────────────────────
+function populateHealSelects() {
+  const sel = document.getElementById('heal-golden-select');
+  sel.innerHTML = STATE.goldens.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
+
+  const failures = STATE.runs.flatMap(r => r.candidates.filter(c=>c.status==='fail').map(c=>({...c, goldenName:r.goldenName})));
+  const failEl = document.getElementById('heal-failures');
+  const failList = document.getElementById('heal-failure-list');
+  if (failures.length) {
+    failEl.style.display = '';
+    failList.innerHTML = failures.slice(0,5).map(f=>`<div class="cand-error" style="margin-bottom:8px">✗ ${esc(f.name)} (Path ${f.path}) — ${esc((f.error||'').slice(0,100))}…</div>`).join('');
+  } else {
+    failEl.style.display = 'none';
+  }
+}
+
+function healLog(msg, cls='log-info') {
+  const el = document.getElementById('heal-log');
+  const t = new Date().toTimeString().slice(0,8);
+  el.innerHTML += `<div class="${cls}"><span class="log-time">[${t}]</span>${esc(msg)}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+async function runHeal() {
+  const gid = document.getElementById('heal-golden-select').value;
+  if (!gid) { toast('Select a golden file first.'); return; }
+  STATE.healGoldenId = gid;
+
+  document.getElementById('heal-form').style.display = 'none';
+  document.getElementById('heal-result').style.display = 'none';
+  document.getElementById('heal-progress').style.display = '';
+  document.getElementById('heal-log').innerHTML = '';
+
+  setProgress('heal-prog-bar', null, 10);
+  healLog('Starting auto-heal analysis…');
+
+  try {
+    setProgress('heal-prog-bar', null, 35);
+    healLog('Sending failure context to Azure OpenAI…');
+
+    const result = await api('POST', '/heal/' + gid);
+    STATE.healCode = result.healedCode;
+
+    setProgress('heal-prog-bar', null, 80);
+    healLog('AI healing complete — building diff…');
+
+    // Changes list
+    const changesEl = document.getElementById('heal-changes');
+    changesEl.innerHTML = (result.changes||[]).map(c=>`<div class="analysis-item" style="color:var(--pass-t)">✓ ${esc(c)}</div>`).join('');
+
+    document.getElementById('heal-code-pre').innerHTML = highlight(result.healedCode);
+
+    setProgress('heal-prog-bar', null, 100);
+    healLog('✓ Auto-heal complete. Review and promote if satisfied.', 'log-ok');
+
+    document.getElementById('heal-result').style.display = '';
+  } catch(e) {
+    healLog('⚠ Error: ' + e.message, 'log-err');
+    document.getElementById('heal-form').style.display = '';
+  }
+}
+
+async function promoteHealed() {
+  try {
+    const updated = await api('PATCH', '/goldens/' + STATE.healGoldenId + '/promote', { code: STATE.healCode });
+    const idx = STATE.goldens.findIndex(g => g.id === STATE.healGoldenId);
+    if (idx >= 0) STATE.goldens[idx] = updated;
+    renderGoldens(); renderNav();
+    toast('✓ Golden promoted — heal #' + updated.healCount);
+    resetHeal();
+    switchTab('golden');
+  } catch(e) { toast('Error: ' + e.message); }
+}
+
+function resetHeal() {
+  ['heal-progress','heal-result'].forEach(id => document.getElementById(id).style.display = 'none');
+  document.getElementById('heal-form').style.display = '';
+  STATE.healCode = ''; STATE.healGoldenId = '';
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function toggleBody(headerEl) {
+  const body = headerEl.parentElement.querySelector('.golden-body, .run-body');
+  body.classList.toggle('open');
+  const arrow = headerEl.querySelector('span:last-child');
+  if (arrow && (arrow.textContent==='▼'||arrow.textContent==='▲')) arrow.textContent = body.classList.contains('open') ? '▲' : '▼';
+}
+
+function codeBlock(code, preId) {
+  return `<div class="code-wrap">
+    <div class="code-header">
+      <span class="code-lang">typescript</span>
+      <button class="code-copy" onclick="copyCode('${preId}')">copy</button>
+    </div>
+    <div class="code-body"><pre id="${preId}">${highlight(esc(code))}</pre></div>
+  </div>`;
+}
+
+function highlight(raw) {
+  return raw
+    .replace(/\[AI-(?:HEAL|SYNTHESIZED)\][^\n]*/g, m => `<span style="color:#fbbf24;font-style:italic">${m}</span>`)
+    .replace(/(\/\/[^\n]*)/g, '<span style="color:#6b7280">$1</span>')
+    .replace(/\b(import|export|const|let|async|await|return|for|of|from|function|if|throw|try|catch)\b/g, '<span style="color:#c084fc">$1</span>')
+    .replace(/\b(test|expect|page|Page|describe|beforeEach|beforeAll)\b/g, '<span style="color:#60a5fa">$1</span>')
+    .replace(/(['"`])(.*?)\1/g, '<span style="color:#34d399">$1$2$1</span>');
+}
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function copyCode(preId) {
+  const el = document.getElementById(preId);
+  navigator.clipboard?.writeText(el.textContent||'');
+  toast('Copied!');
+}
+
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.style.display = msg ? '' : 'none';
+}
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.nav-item').forEach(n => {
+    n.classList.toggle('active', n.dataset.tab === tab);
+  });
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-'+tab));
+  if (tab === 'heal') populateHealSelects();
+}
+
+boot();
+</script>
+</body>
+</html>

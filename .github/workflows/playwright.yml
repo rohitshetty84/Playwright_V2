@@ -1,0 +1,158 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Playwright AI Studio — GitHub Actions workflow
+#
+# Three jobs, run in order:
+#   1. prepare-goldens   → materialize golden/*.json into runnable .ts specs
+#   2. playwright-test   → npm ci + npx playwright test (headless, Edge channel)
+#   3. report-runs       → POST results.json back to a deployed Studio
+#                           (skipped automatically if PLAYWRIGHT_AI_STUDIO_URL
+#                            is not set as a repository variable)
+#
+# Required repository **secrets**  (Settings → Secrets and variables → Actions → New repository secret):
+#   PLAYWRIGHT_AI_STUDIO_TOKEN   (optional) bearer token for POST /api/runs
+#   AZURE_OPENAI_API_KEY         (only if you wire up an auto-heal job)
+#
+# Required repository **variables** (Settings → Secrets and variables → Actions → Variables tab):
+#   PLAYWRIGHT_AI_STUDIO_URL     (optional) e.g. https://studio.example.com
+#                                 — used as the gate for the report-runs job
+#   GOLDEN_ID                    (optional) defaults to seed-g1
+#   BROWSER                      (optional) defaults to msedge
+#   AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_DEPLOYMENT
+#                                (optional, only for auto-heal jobs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Playwright AI Studio
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * *"      # nightly at 02:00 UTC
+  workflow_dispatch:           # manual trigger from the Actions tab
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Job 1: prepare ────────────────────────────────────────────────────────
+  prepare-goldens:
+    name: Prepare goldens
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Export golden JSON → tests/*.spec.ts
+        run: python ci/export_goldens.py --from golden --to tests
+
+      - name: List exported specs
+        run: ls -la tests/
+
+      - name: Upload tests artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests
+          path: tests/
+          retention-days: 1
+          if-no-files-found: error
+
+  # ─── Job 2: test ───────────────────────────────────────────────────────────
+  playwright-test:
+    name: Playwright test
+    needs: prepare-goldens
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exported tests
+        uses: actions/download-artifact@v4
+        with:
+          name: tests
+          path: tests/
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install npm deps
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json') }}
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps msedge chromium
+
+      - name: Run Playwright
+        run: npx playwright test --reporter=list,html,json,junit
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+            results.json
+            junit.xml
+          retention-days: 7
+
+      - name: Publish JUnit summary
+        if: always()
+        uses: mikepenz/action-junit-report@v4
+        with:
+          report_paths: "junit.xml"
+          require_tests: false
+
+  # ─── Job 3: report ─────────────────────────────────────────────────────────
+  report-runs:
+    name: Report run to Studio
+    needs: playwright-test
+    runs-on: ubuntu-latest
+    if: ${{ always() && vars.PLAYWRIGHT_AI_STUDIO_URL != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Playwright report
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-report
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: POST results.json → /api/runs
+        env:
+          PLAYWRIGHT_AI_STUDIO_URL: ${{ vars.PLAYWRIGHT_AI_STUDIO_URL }}
+          PLAYWRIGHT_AI_STUDIO_TOKEN: ${{ secrets.PLAYWRIGHT_AI_STUDIO_TOKEN }}
+          GOLDEN_ID: ${{ vars.GOLDEN_ID || 'seed-g1' }}
+          BROWSER: ${{ vars.BROWSER || 'msedge' }}
+        run: python ci/report_run.py results.json
