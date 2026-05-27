@@ -19,7 +19,9 @@
 #                                 e.g. "seed-g1,4217f745". Leave unset to run all.
 #                                 Overridden per-run by the workflow_dispatch input.
 #   GOLDEN_ID                    (optional) which golden to attribute the run to
-#                                 when POSTing to /api/runs. Defaults to seed-g1.
+#                                 when POSTing to /api/runs. If unset, auto-detects
+#                                 the first golden found. Auto-Heal uses this to find
+#                                 errors specific to that golden.
 #   BROWSER                      (optional) defaults to msedge
 #   AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_DEPLOYMENT
 #                                (optional, only for auto-heal jobs)
@@ -37,7 +39,7 @@ on:
   workflow_dispatch:           # manual trigger from the Actions tab
     inputs:
       golden_ids:
-        description: 'Comma-separated golden IDs to run (leave blank = all). Example: seed-g1,4217f745'
+        description: 'Comma-separated golden IDs to run (leave blank = all). Example: onboarding-test,4217f745'
         required: false
         default: ''
 
@@ -181,6 +183,23 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: playwright-report
+          path: ./
+
+      - name: Verify results.json exists
+        run: |
+          if [ ! -f results.json ]; then
+            echo "❌ ERROR: results.json not found!"
+            echo "Current directory:"
+            pwd
+            echo "Files in current directory:"
+            ls -la
+            echo "Looking for results.json anywhere..."
+            find . -name "results.json" -type f
+            exit 1
+          else
+            echo "✓ results.json found at:"
+            ls -la results.json
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -190,10 +209,26 @@ jobs:
       - name: Install requests
         run: pip install requests
 
+      - name: Auto-detect golden ID if not set
+        run: |
+          if [ -z "${{ vars.GOLDEN_ID }}" ]; then
+            FIRST_GOLDEN=$(ls -1 playwright-ai-studio/golden/*.json 2>/dev/null | head -1 | xargs basename -s .json)
+            if [ -n "$FIRST_GOLDEN" ]; then
+              echo "DETECTED_GOLDEN_ID=$FIRST_GOLDEN" >> $GITHUB_ENV
+              echo "✓ Auto-detected golden: $FIRST_GOLDEN"
+            else
+              echo "❌ No golden files found in playwright-ai-studio/golden/"
+              exit 1
+            fi
+          else
+            echo "DETECTED_GOLDEN_ID=${{ vars.GOLDEN_ID }}" >> $GITHUB_ENV
+            echo "✓ Using configured GOLDEN_ID: ${{ vars.GOLDEN_ID }}"
+          fi
+
       - name: POST results.json → /api/runs
         env:
           PLAYWRIGHT_AI_STUDIO_URL: ${{ vars.PLAYWRIGHT_AI_STUDIO_URL }}
           PLAYWRIGHT_AI_STUDIO_TOKEN: ${{ secrets.PLAYWRIGHT_AI_STUDIO_TOKEN }}
-          GOLDEN_ID: ${{ vars.GOLDEN_ID || 'seed-g1' }}
+          GOLDEN_ID: ${{ env.DETECTED_GOLDEN_ID }}
           BROWSER: ${{ vars.BROWSER || 'msedge' }}
         run: python ci/report_run.py results.json

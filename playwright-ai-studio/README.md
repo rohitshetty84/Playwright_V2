@@ -31,10 +31,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env — fill in your endpoint, key, and deployment name
 
-# 5. (Optional) Pre-populate with your existing onboarding data
-python seed_data.py
-
-# 6. Start the server
+# 5. Start the server
 python server.py
 ```
 
@@ -66,7 +63,7 @@ Immutable reference scripts. Each golden tracks its heal count and last-healed d
 Golden files are **never silently modified**.
 
 ### 3 — Run History
-After each Playwright run, POST your results to `/api/runs` (or use `seed_data.py` to seed historical data).  
+After each Playwright run, POST your results to `/api/runs`.
 Pass/fail per candidate is displayed with full error messages.
 
 ### 4 — Auto-Heal
@@ -98,12 +95,12 @@ After your test suite finishes, post results like this:
 import requests, json
 
 requests.post("http://localhost:8000/api/runs", json={
-    "golden_id": "seed-g1",
+    "golden_id": "your-golden-id",
     "browser": "msedge",
     "candidates": [
-        {"name": "Rosa Philp",      "path": "A", "status": "pass", "duration": "48s"},
-        {"name": "Test Onb123",     "path": "B", "status": "fail", "duration": "12s",
-         "error": "TimeoutError: Nudge button not found after 15000ms"},
+        {"name": "Test Case A",      "path": "A", "status": "pass", "duration": "48s"},
+        {"name": "Test Case B",      "path": "B", "status": "fail", "duration": "12s",
+         "error": "TimeoutError: element not found after 15000ms"},
     ]
 })
 ```
@@ -117,7 +114,6 @@ Or use the included `excel-reporter.ts` as a reference to also POST to this API.
 ```
 playwright-ai-studio/
 ├── server.py          # FastAPI backend
-├── seed_data.py       # Pre-populate with existing project data
 ├── requirements.txt
 ├── .env.example
 ├── static/

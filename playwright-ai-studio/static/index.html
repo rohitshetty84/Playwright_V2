@@ -397,7 +397,7 @@ function renderNav() {
   document.getElementById('nav-golden-count').textContent = STATE.goldens.length;
   document.getElementById('badge-goldens').textContent = STATE.goldens.length + ' golden' + (STATE.goldens.length !== 1 ? 's' : '');
   document.getElementById('nav-run-count').textContent = STATE.runs.length;
-  const fails = STATE.runs.flatMap(r => r.candidates.filter(c => c.status === 'fail')).length;
+  const fails = STATE.runs.flatMap(r => (Array.isArray(r.candidates) ? r.candidates : []).filter(c => c.status === 'fail')).length;
   const fb = document.getElementById('nav-fail-count');
   fb.style.display = fails > 0 ? '' : 'none';
   fb.textContent = fails + ' fail' + (fails !== 1 ? 's' : '');
@@ -524,8 +524,10 @@ function renderGoldens() {
       <div class="golden-body">
         ${g.code ? codeBlock(g.code, 'golden-code-'+g.id) : '<div style="color:var(--text2);font-size:12px">Code not stored — re-synthesize to populate.</div>'}
         <div class="locked-notice">🔒 Golden is locked. Go to Auto-Heal to modify.</div>
+        <div id="status-${g.id}" style="margin-top:12px"></div>
         <div class="row mt-12">
           <button class="btn btn-primary btn-sm" onclick="runGoldenInCI('${g.id}', '${esc(g.name)}')">▶ Run in CI</button>
+          <button class="btn btn-ghost btn-sm" onclick="checkWorkflowStatus('${g.id}')">🔍 Check Status</button>
         </div>
       </div>
     </div>`).join('');
@@ -536,8 +538,9 @@ function renderRuns() {
   const el = document.getElementById('run-list');
   if (!STATE.runs.length) { el.innerHTML = '<div class="empty">No test runs recorded yet.</div>'; return; }
   el.innerHTML = STATE.runs.map(r => {
-    const pass = r.candidates.filter(c=>c.status==='pass').length;
-    const fail = r.candidates.filter(c=>c.status==='fail').length;
+    const candidates = Array.isArray(r.candidates) ? r.candidates : [];
+    const pass = candidates.filter(c=>c.status==='pass').length;
+    const fail = candidates.filter(c=>c.status==='fail').length;
     const ov = fail > 0 ? 'fail' : 'pass';
     return `
     <div class="run-card" style="margin-bottom:12px">
@@ -557,7 +560,7 @@ function renderRuns() {
         </div>
       </div>
       <div class="run-body">
-        ${r.candidates.map(c => `
+        ${candidates.map(c => `
           <div class="cand-row ${c.status}">
             <div class="row">
               <span class="badge badge-${c.status}">${c.status.toUpperCase()}</span>
@@ -578,7 +581,7 @@ function populateHealSelects() {
   const sel = document.getElementById('heal-golden-select');
   sel.innerHTML = STATE.goldens.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
 
-  const failures = STATE.runs.flatMap(r => r.candidates.filter(c=>c.status==='fail').map(c=>({...c, goldenName:r.goldenName})));
+  const failures = STATE.runs.flatMap(r => (Array.isArray(r.candidates) ? r.candidates : []).filter(c=>c.status==='fail').map(c=>({...c, goldenName:r.goldenName})));
   const failEl = document.getElementById('heal-failures');
   const failList = document.getElementById('heal-failure-list');
   if (failures.length) {
@@ -638,9 +641,8 @@ async function runHeal() {
 async function promoteHealed() {
   try {
     const updated = await api('PATCH', '/goldens/' + STATE.healGoldenId + '/promote', { code: STATE.healCode });
-    const idx = STATE.goldens.findIndex(g => g.id === STATE.healGoldenId);
-    if (idx >= 0) STATE.goldens[idx] = updated;
-    renderGoldens(); renderNav();
+    await fetchGoldens();
+    renderNav();
     toast('✓ Golden promoted — heal #' + updated.healCount);
     resetHeal();
     switchTab('golden');
@@ -714,9 +716,74 @@ async function runGoldenInCI(goldenId, goldenName) {
     const response = await api('POST', '/trigger-ci/' + goldenId);
     toast('✓ CI workflow triggered: ' + goldenName);
     console.log('CI triggered:', response);
+    // Auto-check status after a short delay
+    setTimeout(() => checkWorkflowStatus(goldenId), 2000);
   } catch (e) {
     toast('✗ Failed to trigger CI: ' + e.message);
     console.error('CI trigger error:', e);
+  }
+}
+
+// ── Check workflow status ────────────────────────────────────────────────
+async function checkWorkflowStatus(goldenId) {
+  const statusEl = document.getElementById('status-' + goldenId);
+  if (!statusEl) return;
+
+  statusEl.innerHTML = '<div style="color:var(--text3);font-size:12px">⏳ Checking status...</div>';
+
+  try {
+    const response = await api('GET', '/workflow-status/' + goldenId);
+
+    if (response.status === 'not_found') {
+      statusEl.innerHTML = '<div style="color:var(--text2);font-size:11px;margin-top:8px">No recent workflow runs found</div>';
+      return;
+    }
+
+    // Format dates
+    const createdDate = new Date(response.created_at);
+    const updatedDate = new Date(response.updated_at);
+    const createdTime = createdDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const updatedTime = updatedDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    // Determine status badge
+    let statusBadge = '';
+    let statusColor = 'var(--text2)';
+    if (response.conclusion === null) {
+      statusBadge = '⏳ Running';
+      statusColor = 'var(--accent2)';
+    } else if (response.conclusion === 'success') {
+      statusBadge = '✓ Success';
+      statusColor = 'var(--pass-t)';
+    } else if (response.conclusion === 'failure') {
+      statusBadge = '✗ Failed';
+      statusColor = 'var(--fail-t)';
+    } else {
+      statusBadge = response.conclusion;
+      statusColor = 'var(--text2)';
+    }
+
+    // Build status display
+    statusEl.innerHTML = `
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;margin-top:8px;font-size:11px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="color:${statusColor};font-weight:600">${statusBadge}</span>
+          <a href="${esc(response.github_link)}" target="_blank" style="color:var(--accent);text-decoration:none;font-size:10px">View in GitHub ↗</a>
+        </div>
+        <div style="color:var(--text2);font-family:'JetBrains Mono',monospace;font-size:10px;line-height:1.6">
+          <div>Run #${response.run_number}</div>
+          <div>Started: ${createdTime}</div>
+          <div>Updated: ${updatedTime}</div>
+          <div style="margin-top:6px;color:var(--text3)">${response.display_title}</div>
+        </div>
+      </div>
+    `;
+
+    // Auto-refresh if still running
+    if (response.conclusion === null) {
+      setTimeout(() => checkWorkflowStatus(goldenId), 5000);
+    }
+  } catch (e) {
+    statusEl.innerHTML = `<div style="color:var(--fail-t);font-size:11px;margin-top:8px">✗ ${esc(e.message)}</div>`;
   }
 }
 

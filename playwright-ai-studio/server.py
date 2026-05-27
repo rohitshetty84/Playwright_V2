@@ -3,7 +3,7 @@ Playwright AI Studio — Python/FastAPI backend
 Azure OpenAI powered test synthesis & auto-healing
 """
 
-import os, json, uuid, re
+import os, json, uuid, re, subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -63,6 +63,11 @@ class RunRequest(BaseModel):
 class HealRequest(BaseModel):
     golden_id: str
 
+class PromoteGoldenRequest(BaseModel):
+    code: str
+
+class TriggerCIRequest(BaseModel):
+    golden_ids: str  # comma-separated list of golden IDs
 # ── Azure OpenAI helper ───────────────────────────────────────────────────────
 def ask_llm(system: str, user: str, max_tokens: int = 1500) -> str:
     try:
@@ -196,20 +201,24 @@ async def create_golden(req: SaveGoldenRequest):
 # ─ Record a test run ──────────────────────────────────────────────────────────
 @app.post("/api/runs")
 async def record_run(req: RunRequest):
+    # Look up golden by ID if it exists (optional for CI/CD robustness)
     golden = next((g for g in load_goldens() if g["id"] == req.golden_id), None)
-    if not golden:
-        raise HTTPException(status_code=404, detail="Golden not found")
 
     rid = str(uuid.uuid4())[:8]
     run = {
         "id": rid,
         "goldenId": req.golden_id,
-        "goldenName": golden["name"],
+        "goldenName": golden["name"] if golden else req.golden_id,  # Use ID as name if golden not found
         "browser": req.browser,
         "runAt": ts_now(),
         "candidates": req.candidates,
     }
     save_json(RUNS_DIR, rid, run)
+
+    # Log for debugging
+    status = "✓ recorded" if golden else "⚠ recorded (golden not found, using ID as name)"
+    print(f"[api/runs] {status} — ID={rid}, golden={req.golden_id}, candidates={len(req.candidates)}")
+
     return run
 
 # ─ Auto-Heal ──────────────────────────────────────────────────────────────────
@@ -258,25 +267,64 @@ Output ONLY the TypeScript code. No markdown.""",
 
 # ─ Promote healed code as new Golden ─────────────────────────────────────────
 @app.patch("/api/goldens/{golden_id}/promote")
-async def promote_healed(golden_id: str, body: dict):
+async def promote_healed(golden_id: str, body: PromoteGoldenRequest):
     goldens = load_goldens()
     golden = next((g for g in goldens if g["id"] == golden_id), None)
     if not golden:
         raise HTTPException(status_code=404, detail="Golden not found")
 
-    golden["code"] = body.get("code", golden["code"])
+    if not body.code.strip():
+        raise HTTPException(status_code=400, detail="Promoted code cannot be empty")
+
+    golden["code"] = body.code
     golden["healCount"] = golden.get("healCount", 0) + 1
     golden["lastHealed"] = ts_now()
     save_json(GOLDEN_DIR, golden_id, golden)
     return golden
 
 # ─ GitHub workflow dispatch helpers ─────────────────────────────────────────
+def parse_github_remote(url: str):
+    if not url:
+        return None
+    if url.startswith("git@github.com:"):
+        path = url.split(":", 1)[1]
+    elif url.startswith("https://github.com/"):
+        path = url[len("https://github.com/"):]
+    elif url.startswith("ssh://git@github.com/"):
+        path = url.split("github.com/", 1)[1]
+    else:
+        return None
+
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.strip("/").split("/")
+    return tuple(parts) if len(parts) == 2 else None
+
+
 def get_github_config():
+    # Reload env each time so updates to .env are picked up while the server runs.
+    if ROOT_ENV.exists():
+        load_dotenv(ROOT_ENV, override=True)
+
     gh_token = os.getenv("GITHUB_TOKEN")
     gh_owner = os.getenv("GITHUB_OWNER")
     gh_repo = os.getenv("GITHUB_REPO")
-    gh_workflow = os.getenv("GITHUB_WORKFLOW", "playwright.yml")
+    gh_workflow = os.getenv("GITHUB_WORKFLOW", "playwright-test.yml")
     gh_branch = os.getenv("GITHUB_BRANCH", "main")
+
+    if not gh_owner or not gh_repo:
+        try:
+            remote_url = subprocess.check_output(
+                ["git", "config", "--get", "remote.origin.url"],
+                cwd=BASE.parent,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            parsed = parse_github_remote(remote_url)
+            if parsed:
+                gh_owner, gh_repo = parsed
+        except Exception:
+            pass
 
     if not all([gh_token, gh_owner, gh_repo]):
         raise HTTPException(
@@ -298,17 +346,50 @@ def dispatch_github_workflow(inputs: dict):
         "ref": gh_branch,
         "inputs": inputs,
     }
-    response = requests.post(url, json=payload, headers=headers, timeout=10)
-    if response.status_code == 204:
-        return {
-            "status": "success",
-            "message": "GitHub workflow dispatched",
-            "inputs": inputs,
-        }
-    raise HTTPException(
-        status_code=response.status_code,
-        detail=f"GitHub API error: {response.text}"
-    )
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+
+        if response.status_code == 204:
+            return {
+                "status": "success",
+                "message": "GitHub workflow dispatched",
+                "inputs": inputs,
+            }
+
+        # Handle error responses with better detail
+        try:
+            error_detail = response.json().get("message", response.text)
+        except Exception:
+            error_detail = response.text
+
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid GitHub token")
+        elif response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {gh_workflow}")
+        else:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"GitHub API error: {error_detail}"
+            )
+
+    except requests.Timeout:
+        raise HTTPException(
+            status_code=504,
+            detail="GitHub API timeout (>15s) - workflow may still be triggered"
+        )
+    except requests.ConnectionError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot reach GitHub API - check internet connection: {str(e)}"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unexpected error triggering workflow: {str(e)}"
+        )
 
 
 # ─ Trigger CI run by golden ID ───────────────────────────────────────────────
@@ -319,21 +400,17 @@ async def trigger_ci(golden_id: str):
     if not golden:
         raise HTTPException(status_code=404, detail="Golden not found")
 
-    gh_workflow = os.getenv("GITHUB_WORKFLOW", "playwright-test.yml")
-    if gh_workflow.endswith("playwright.yml"):
-        inputs = {"golden_ids": golden_id}
-    else:
-        inputs = {"golden_name": golden["name"], "golden_id": golden_id}
-
+    # Use consistent input format for all workflows
+    inputs = {"golden_name": golden["name"], "golden_id": golden_id}
     result = dispatch_github_workflow(inputs)
     return {**result, "golden_id": golden_id, "golden_name": golden["name"]}
 
 
 # ─ Trigger CI run by golden_ids string ─────────────────────────────────────────
 @app.post("/api/trigger-ci")
-async def trigger_ci_ids(body: dict):
-    golden_ids_raw = body.get("golden_ids", "") if isinstance(body, dict) else ""
-    golden_ids = [gid.strip() for gid in golden_ids_raw.split(",") if gid.strip()]
+async def trigger_ci_ids(body: TriggerCIRequest):
+    """Trigger workflow for multiple golden tests (comma-separated IDs)"""
+    golden_ids = [gid.strip() for gid in body.golden_ids.split(",") if gid.strip()]
     if not golden_ids:
         raise HTTPException(status_code=400, detail="Please provide one or more golden_ids")
 
@@ -342,9 +419,112 @@ async def trigger_ci_ids(body: dict):
     if invalid:
         raise HTTPException(status_code=404, detail=f"Unknown golden IDs: {', '.join(invalid)}")
 
+    # For multi-trigger, use first golden's name as reference
+    golden_names = [g["name"] for g in load_goldens() if g["id"] in golden_ids]
     inputs = {"golden_ids": ",".join(golden_ids)}
     result = dispatch_github_workflow(inputs)
-    return {**result, "golden_ids": golden_ids}
+    return {**result, "golden_ids": golden_ids, "golden_count": len(golden_ids)}
+
+
+# ─ Get workflow run status ────────────────────────────────────────────────────
+@app.get("/api/workflow-status/{golden_id}")
+async def get_workflow_status(golden_id: str):
+    """Get status of the most recent workflow run for a golden"""
+    try:
+        gh_token, gh_owner, gh_repo, gh_workflow, gh_branch = get_github_config()
+
+        # Get recent workflow runs
+        url = f"https://api.github.com/repos/{gh_owner}/{gh_repo}/actions/workflows/{gh_workflow}/runs"
+        headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+
+        response = requests.get(url, headers=headers, timeout=10, params={"per_page": 10})
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to fetch workflow runs: {response.text}"
+            )
+
+        runs = response.json().get("workflow_runs", [])
+
+        # Find run for this golden_id by checking workflow inputs
+        matching_run = None
+        for run in runs:
+            inputs = run.get("inputs", {})
+            if inputs.get("golden_id") == golden_id:
+                matching_run = run
+                break
+
+        if not matching_run:
+            return {
+                "status": "not_found",
+                "message": "No workflow run found for this golden",
+                "golden_id": golden_id,
+            }
+
+        return {
+            "status": "found",
+            "golden_id": golden_id,
+            "run_id": matching_run["id"],
+            "run_number": matching_run["run_number"],
+            "name": matching_run["name"],
+            "conclusion": matching_run.get("conclusion"),  # null=running, success/failure
+            "status": matching_run["status"],  # queued, in_progress, completed
+            "created_at": matching_run["created_at"],
+            "updated_at": matching_run["updated_at"],
+            "html_url": matching_run["html_url"],
+            "github_link": matching_run["html_url"],
+            "display_title": matching_run.get("display_title", matching_run["name"]),
+        }
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="GitHub API timeout")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Error fetching workflow status: {str(e)}")
+
+
+# ─ Health check endpoints ──────────────────────────────────────────────────────
+@app.get("/api/health")
+async def health_check():
+    """Basic health check"""
+    return {"status": "healthy", "service": "Playwright AI Studio"}
+
+
+@app.get("/api/health/github")
+async def check_github_health():
+    """Verify GitHub credentials and API access"""
+    try:
+        gh_token, gh_owner, gh_repo, gh_workflow, gh_branch = get_github_config()
+
+        # Check if repo is accessible
+        url = f"https://api.github.com/repos/{gh_owner}/{gh_repo}"
+        headers = {"Authorization": f"token {gh_token}"}
+        response = requests.get(url, headers=headers, timeout=5)
+
+        if response.status_code == 200:
+            repo_data = response.json()
+            return {
+                "status": "healthy",
+                "owner": gh_owner,
+                "repo": gh_repo,
+                "workflow": gh_workflow,
+                "branch": gh_branch,
+                "repo_url": repo_data.get("html_url"),
+            }
+        elif response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid GitHub token - check GITHUB_TOKEN in .env")
+        elif response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Repository not found: {gh_owner}/{gh_repo}")
+        else:
+            raise HTTPException(status_code=response.status_code, detail=f"GitHub API returned {response.status_code}")
+
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="GitHub API timeout")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"GitHub check failed: {str(e)}")
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────

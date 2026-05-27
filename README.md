@@ -36,10 +36,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env — fill in your endpoint, key, and deployment name
 
-# 5. (Optional) Pre-populate with your existing onboarding data
-python seed_data.py
-
-# 6. Start the server
+# 5. Start the server
 python server.py
 ```
 
@@ -84,7 +81,7 @@ GitHub: **Settings → Secrets and variables → Actions**. Two tabs — **Secre
 |------|------|-----------|-------|
 | `PLAYWRIGHT_AI_STUDIO_URL` | **Variable** | optional | e.g. `https://studio.example.com`. Acts as the gate — the `report-runs` job only runs when this variable is set. |
 | `PLAYWRIGHT_AI_STUDIO_TOKEN` | **Secret** | optional | Sent as `Authorization: Bearer …` to `/api/runs` if your deployment requires auth. |
-| `GOLDEN_ID` | **Variable** | optional | Defaults to `seed-g1`. Override per-environment if you maintain multiple goldens. |
+| `GOLDEN_ID` | **Variable** | optional | Which golden to attribute the run to. Defaults to `ci-run` if unset. |
 | `BROWSER` | **Variable** | optional | Defaults to `msedge`. |
 | `AZURE_OPENAI_ENDPOINT` | **Variable** | only for auto-heal jobs | Not used by default CI run. Add if you wire up a nightly heal job. |
 | `AZURE_OPENAI_API_KEY` | **Secret** | only for auto-heal jobs | Always keep as a secret, never a variable. |
@@ -117,7 +114,7 @@ By default the workflow runs **every** `*.json` file in `golden/`. To run a subs
 Actions tab → "Playwright AI Studio" → **Run workflow** button → in the **"Comma-separated golden IDs"** text box, type the IDs you want:
 
 ```
-seed-g1,4217f745
+onboarding-test,4217f745
 ```
 
 Click **Run workflow**. Only those goldens get materialized and tested. Useful for "I just changed one spec, only run that one."
@@ -128,7 +125,7 @@ Settings → Secrets and variables → Actions → **Variables** tab → New rep
 
 | Name | Value |
 |------|-------|
-| `GOLDEN_IDS` | `seed-g1,4217f745` |
+| `GOLDEN_IDS` | `onboarding-test,4217f745` |
 
 Now every automatic run (push, PR, nightly cron) only runs that subset. Remove the variable to go back to "run all."
 
@@ -166,7 +163,7 @@ Immutable reference scripts. Each golden tracks its heal count and last-healed d
 Golden files are **never silently modified**. In CI they're exported to `tests/` per pipeline run, never edited in place.
 
 ### 3 — Run History
-After each Playwright run, results are POSTed to `/api/runs`. In CI this is done automatically by `ci/report_run.py`. Locally you can also use `seed_data.py` to load historical data.
+After each Playwright run, results are POSTed to `/api/runs`. In CI this is done automatically by `ci/report_run.py`.
 Pass/fail per candidate is displayed with full error messages.
 
 ### 4 — Auto-Heal
@@ -198,12 +195,12 @@ The CI pipeline does this for you via `ci/report_run.py`. To do it by hand:
 import requests
 
 requests.post("http://localhost:8000/api/runs", json={
-    "golden_id": "seed-g1",
+    "golden_id": "your-golden-id",
     "browser": "msedge",
     "candidates": [
         {"name": "Rosa Philp",  "path": "A", "status": "pass", "duration": "48s"},
-        {"name": "Test Onb123", "path": "B", "status": "fail", "duration": "12s",
-         "error": "TimeoutError: Nudge button not found after 15000ms"},
+        {"name": "Test Candidate", "path": "B", "status": "fail", "duration": "12s",
+         "error": "TimeoutError: element not found after 15000ms"},
     ]
 })
 ```
@@ -215,7 +212,6 @@ requests.post("http://localhost:8000/api/runs", json={
 ```
 playwright-ai-studio/
 ├── server.py            # FastAPI backend
-├── seed_data.py         # Pre-populate with existing project data
 ├── requirements.txt     # Python deps (FastAPI, OpenAI, etc.)
 ├── package.json         # Node deps (Playwright)
 ├── playwright.config.ts # Playwright config — CI-friendly defaults
@@ -238,7 +234,7 @@ playwright-ai-studio/
 ## Troubleshooting (CI)
 
 **`no goldens exported — nothing to test`**
-The `golden/` directory is empty (or only has malformed JSON). Commit at least one valid golden, or run `python seed_data.py` and commit `golden/seed-g1.json`.
+The `golden/` directory is empty (or only has malformed JSON). Commit at least one valid golden to the repository.
 
 **`Executable doesn't exist at ...ms-edge`**
 Edge channel needs a one-time install. The workflow already runs `npx playwright install --with-deps msedge` — make sure you didn't remove it.

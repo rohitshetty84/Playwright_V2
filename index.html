@@ -383,7 +383,7 @@ function renderNav() {
   document.getElementById('nav-golden-count').textContent = STATE.goldens.length;
   document.getElementById('badge-goldens').textContent = STATE.goldens.length + ' golden' + (STATE.goldens.length !== 1 ? 's' : '');
   document.getElementById('nav-run-count').textContent = STATE.runs.length;
-  const fails = STATE.runs.flatMap(r => r.candidates.filter(c => c.status === 'fail')).length;
+  const fails = STATE.runs.flatMap(r => (Array.isArray(r.candidates) ? r.candidates : []).filter(c => c.status === 'fail')).length;
   const fb = document.getElementById('nav-fail-count');
   fb.style.display = fails > 0 ? '' : 'none';
   fb.textContent = fails + ' fail' + (fails !== 1 ? 's' : '');
@@ -519,8 +519,9 @@ function renderRuns() {
   const el = document.getElementById('run-list');
   if (!STATE.runs.length) { el.innerHTML = '<div class="empty">No test runs recorded yet.</div>'; return; }
   el.innerHTML = STATE.runs.map(r => {
-    const pass = r.candidates.filter(c=>c.status==='pass').length;
-    const fail = r.candidates.filter(c=>c.status==='fail').length;
+    const candidates = Array.isArray(r.candidates) ? r.candidates : [];
+    const pass = candidates.filter(c=>c.status==='pass').length;
+    const fail = candidates.filter(c=>c.status==='fail').length;
     const ov = fail > 0 ? 'fail' : 'pass';
     return `
     <div class="run-card" style="margin-bottom:12px">
@@ -540,7 +541,7 @@ function renderRuns() {
         </div>
       </div>
       <div class="run-body">
-        ${r.candidates.map(c => `
+        ${candidates.map(c => `
           <div class="cand-row ${c.status}">
             <div class="row">
               <span class="badge badge-${c.status}">${c.status.toUpperCase()}</span>
@@ -561,7 +562,7 @@ function populateHealSelects() {
   const sel = document.getElementById('heal-golden-select');
   sel.innerHTML = STATE.goldens.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
 
-  const failures = STATE.runs.flatMap(r => r.candidates.filter(c=>c.status==='fail').map(c=>({...c, goldenName:r.goldenName})));
+  const failures = STATE.runs.flatMap(r => (Array.isArray(r.candidates) ? r.candidates : []).filter(c=>c.status==='fail').map(c=>({...c, goldenName:r.goldenName})));
   const failEl = document.getElementById('heal-failures');
   const failList = document.getElementById('heal-failure-list');
   if (failures.length) {
@@ -621,9 +622,8 @@ async function runHeal() {
 async function promoteHealed() {
   try {
     const updated = await api('PATCH', '/goldens/' + STATE.healGoldenId + '/promote', { code: STATE.healCode });
-    const idx = STATE.goldens.findIndex(g => g.id === STATE.healGoldenId);
-    if (idx >= 0) STATE.goldens[idx] = updated;
-    renderGoldens(); renderNav();
+    await fetchGoldens();
+    renderNav();
     toast('✓ Golden promoted — heal #' + updated.healCount);
     resetHeal();
     switchTab('golden');

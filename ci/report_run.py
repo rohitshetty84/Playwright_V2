@@ -92,9 +92,14 @@ def main() -> int:
         print("[report_run] no candidates parsed from report — nothing to send")
         return 0
 
-    # If you maintain multiple goldens, set GOLDEN_ID per-job (e.g. via a matrix);
-    # otherwise default to the seed.
-    golden_id = os.environ.get("GOLDEN_ID", "seed-g1")
+    # GOLDEN_ID is set by the workflow (either from repository variable or auto-detected).
+    # It identifies which golden test the results belong to.
+    # Auto-Heal uses GOLDEN_ID to find errors specific to that golden.
+    # Workflow auto-detects first available golden if not explicitly set.
+    golden_id = os.environ.get("GOLDEN_ID")
+    if not golden_id:
+        print("[report_run] ERROR: GOLDEN_ID not set by workflow", file=sys.stderr)
+        return 1
     browser = os.environ.get("BROWSER", "msedge")
 
     payload = {"golden_id": golden_id, "browser": browser, "candidates": candidates}

@@ -61,7 +61,8 @@ class RunRequest(BaseModel):
 
 class HealRequest(BaseModel):
     golden_id: str
-
+class PromoteGoldenRequest(BaseModel):
+    code: str
 # ── Azure OpenAI helper ───────────────────────────────────────────────────────
 def ask_llm(system: str, user: str, max_tokens: int = 1500) -> str:
     try:
@@ -257,13 +258,16 @@ Output ONLY the TypeScript code. No markdown.""",
 
 # ─ Promote healed code as new Golden ─────────────────────────────────────────
 @app.patch("/api/goldens/{golden_id}/promote")
-async def promote_healed(golden_id: str, body: dict):
+async def promote_healed(golden_id: str, body: PromoteGoldenRequest):
     goldens = load_goldens()
     golden = next((g for g in goldens if g["id"] == golden_id), None)
     if not golden:
         raise HTTPException(status_code=404, detail="Golden not found")
 
-    golden["code"] = body.get("code", golden["code"])
+    if not body.code.strip():
+        raise HTTPException(status_code=400, detail="Promoted code cannot be empty")
+
+    golden["code"] = body.code
     golden["healCount"] = golden.get("healCount", 0) + 1
     golden["lastHealed"] = ts_now()
     save_json(GOLDEN_DIR, golden_id, golden)
