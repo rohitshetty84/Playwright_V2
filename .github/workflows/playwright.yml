@@ -1,249 +1,74 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Playwright AI Studio — GitHub Actions workflow
-#
-# Three jobs, run in order:
-#   1. prepare-goldens   → materialize golden/*.json into runnable .ts specs
-#   2. playwright-test   → npm ci + npx playwright test (headless, Edge channel)
-#   3. report-runs       → POST results.json back to a deployed Studio
-#                           (skipped automatically if PLAYWRIGHT_AI_STUDIO_URL
-#                            is not set as a repository variable)
-#
-# Required repository **secrets**  (Settings → Secrets and variables → Actions → New repository secret):
-#   PLAYWRIGHT_AI_STUDIO_TOKEN   (optional) bearer token for POST /api/runs
-#   AZURE_OPENAI_API_KEY         (only if you wire up an auto-heal job)
-#
-# Required repository **variables** (Settings → Secrets and variables → Actions → Variables tab):
-#   PLAYWRIGHT_AI_STUDIO_URL     (optional) e.g. https://studio.example.com
-#                                 — used as the gate for the report-runs job
-#   GOLDEN_IDS                   (optional) comma-separated golden IDs to run by default,
-#                                 e.g. "seed-g1,4217f745". Leave unset to run all.
-#                                 Overridden per-run by the workflow_dispatch input.
-#   GOLDEN_ID                    (optional) which golden to attribute the run to
-#                                 when POSTing to /api/runs. If unset, auto-detects
-#                                 the first golden found. Auto-Heal uses this to find
-#                                 errors specific to that golden.
-#   BROWSER                      (optional) defaults to msedge
-#   AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_DEPLOYMENT
-#                                (optional, only for auto-heal jobs)
-# ─────────────────────────────────────────────────────────────────────────────
-
-name: Playwright AI Studio
+name: Playwright Tests
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    - cron: "0 2 * * *"      # nightly at 02:00 UTC
-  workflow_dispatch:           # manual trigger from the Actions tab
+  workflow_dispatch:
     inputs:
-      golden_ids:
-        description: 'Comma-separated golden IDs to run (leave blank = all). Example: onboarding-test,4217f745'
+      golden_id:
+        description: 'Golden test ID to run'
         required: false
-        default: ''
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+        type: string
+      golden_ids:
+        description: 'Comma-separated golden test IDs'
+        required: false
+        type: string
+      golden_name:
+        description: 'Golden test name'
+        required: false
+        type: string
 
 jobs:
-  # ─── Job 1: prepare ────────────────────────────────────────────────────────
-  prepare-goldens:
-    name: Prepare goldens
+  test:
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
 
-      - name: Install Python deps
-        run: pip install -r requirements.txt
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
 
-      - name: Export golden JSON → tests/*.spec.ts
-        # Precedence: workflow_dispatch input > GOLDEN_IDS repo variable > "" (all)
-        # Goldens live under playwright-ai-studio/golden/, not the repo root.
-        env:
-          GOLDEN_IDS: ${{ github.event.inputs.golden_ids || vars.GOLDEN_IDS || '' }}
-          GOLDEN_DIR: playwright-ai-studio/golden
+      - name: Install Python dependencies
         run: |
-          if [ -n "$GOLDEN_IDS" ]; then
-            echo "Selective run — IDs: $GOLDEN_IDS"
-            python ci/export_goldens.py --from "$GOLDEN_DIR" --to tests --ids "$GOLDEN_IDS"
-          else
-            echo "No filter set — exporting every golden"
-            python ci/export_goldens.py --from "$GOLDEN_DIR" --to tests
-          fi
-
-      - name: Copy fixture files alongside specs
-        # AI-generated specs frequently import sibling modules like ./test-data
-        # or read sibling files like ./user.json. We ship stubs in ci/fixtures/
-        # so the specs at least resolve their imports in CI.
-        run: |
-          if [ -d ci/fixtures ]; then
-            cp -v ci/fixtures/* tests/
-            cp -v ci/fixtures/user.json .
-          else
-            echo "ci/fixtures/ not present — skipping fixture copy"
-          fi
-
-      - name: List exported specs
-        run: ls -la tests/
-
-      - name: Upload tests artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: tests
-          path: tests/
-          retention-days: 1
-          if-no-files-found: error
-
-  # ─── Job 2: test ───────────────────────────────────────────────────────────
-  playwright-test:
-    name: Playwright test
-    needs: prepare-goldens
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Copy root fixtures
-        run: |
-          if [ -f ci/fixtures/user.json ]; then
-            cp -v ci/fixtures/user.json .
-          fi
-
-      - name: Download exported tests
-        uses: actions/download-artifact@v7
-        with:
-          name: tests
-          path: tests/
-
-      - name: Set up Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: "20"
-          # `cache: "npm"` intentionally omitted — it requires package-lock.json
-          # to exist in the repo. Commit a lockfile (run `npm install` locally
-          # and commit the generated package-lock.json) to re-enable caching.
-
-      - name: Install npm deps
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json') }}
+          python -m pip install --upgrade pip
+          pip install -r ci/requirements.txt
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps msedge chromium
+        run: npx playwright install
+
+      - name: Export golden tests to .spec.ts files
+        run: |
+          if [ -n "${{ inputs.golden_ids }}" ]; then
+            python ci/export_goldens.py --from golden --to tests --ids "${{ inputs.golden_ids }}"
+          elif [ -n "${{ inputs.golden_id }}" ]; then
+            python ci/export_goldens.py --from golden --to tests --ids "${{ inputs.golden_id }}"
+          else
+            python ci/export_goldens.py --from golden --to tests
+          fi
+
+      - name: Install npm dependencies
+        run: npm install
 
       - name: Run Playwright tests
-        run: npx playwright test
+        run: npx playwright test --reporter=json,html
         continue-on-error: true
 
-      - name: Debug - Check test output
+      - name: Upload test results
         if: always()
-        run: |
-          echo "=== Checking for generated files ==="
-          echo "results.json:" && [ -f results.json ] && echo "✓ Found" || echo "❌ Not found"
-          echo "junit.xml:" && [ -f junit.xml ] && echo "✓ Found" || echo "❌ Not found"
-          echo "playwright-report/:" && [ -d playwright-report ] && echo "✓ Found" || echo "❌ Not found"
-
-          echo ""
-          echo "=== Current directory listing ==="
-          ls -la
-
-          echo ""
-          echo "=== Finding all Playwright artifacts ==="
-          find . -type f \( -name "results.json" -o -name "junit.xml" \) 2>/dev/null
-
-      - name: Upload Playwright artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: playwright-report
-          path: |
-            playwright-report/
-            results.json
-            junit.xml
-          retention-days: 7
-          if-no-files-found: warn
+          path: playwright-report/
+          retention-days: 30
 
-      - name: Publish JUnit summary
+      - name: Publish test results
         if: always()
-        uses: mikepenz/action-junit-report@v5
+        uses: daun/playwright-report-action@v3
         with:
-          report_paths: "junit.xml"
-          require_tests: false
-
-  # ─── Job 3: report ─────────────────────────────────────────────────────────
-  report-runs:
-    name: Report run to Studio
-    needs: playwright-test
-    runs-on: ubuntu-latest
-    if: ${{ always() && vars.PLAYWRIGHT_AI_STUDIO_URL != '' }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Download Playwright report
-        uses: actions/download-artifact@v4
-        with:
-          name: playwright-report
-          path: ./
-        continue-on-error: true
-
-      - name: Check for results.json
-        run: |
-          echo "=== Checking for results.json ==="
-          if [ -f results.json ]; then
-            echo "✓ results.json found"
-            ls -lh results.json
-          else
-            echo "⚠️ results.json not found - tests may have failed to generate reports"
-            echo "Current directory contents:"
-            ls -la
-            exit 0  # Don't fail the job if artifact is missing
-          fi
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install requests
-        run: pip install requests
-
-      - name: Auto-detect golden ID if not set
-        run: |
-          if [ -z "${{ vars.GOLDEN_ID }}" ]; then
-            FIRST_GOLDEN=$(ls -1 playwright-ai-studio/golden/*.json 2>/dev/null | head -1 | xargs basename -s .json)
-            if [ -n "$FIRST_GOLDEN" ]; then
-              echo "DETECTED_GOLDEN_ID=$FIRST_GOLDEN" >> $GITHUB_ENV
-              echo "✓ Auto-detected golden: $FIRST_GOLDEN"
-            else
-              echo "❌ No golden files found in playwright-ai-studio/golden/"
-              exit 1
-            fi
-          else
-            echo "DETECTED_GOLDEN_ID=${{ vars.GOLDEN_ID }}" >> $GITHUB_ENV
-            echo "✓ Using configured GOLDEN_ID: ${{ vars.GOLDEN_ID }}"
-          fi
-
-      - name: POST results.json → /api/runs
-        env:
-          PLAYWRIGHT_AI_STUDIO_URL: ${{ vars.PLAYWRIGHT_AI_STUDIO_URL }}
-          PLAYWRIGHT_AI_STUDIO_TOKEN: ${{ secrets.PLAYWRIGHT_AI_STUDIO_TOKEN }}
-          GOLDEN_ID: ${{ env.DETECTED_GOLDEN_ID }}
-          BROWSER: ${{ vars.BROWSER || 'msedge' }}
-        run: python ci/report_run.py results.json
+          report_path: playwright-report
