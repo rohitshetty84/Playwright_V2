@@ -694,27 +694,107 @@ async function runSynthesize() {
 
   document.getElementById('synth-form').style.display = 'none';
   document.getElementById('synth-progress').style.display = '';
-  setProgress('synth-prog-bar', 'synth-prog-label', 10, '🔍 Analysing test structure…');
+  setProgress('synth-prog-bar', 'synth-prog-label', 10, '🔍 Generating test with observer hooks…');
 
   try {
-    // Step 1 — Analyse
-    const analysis = await api('POST', '/synthesize/analyse', { test_case: tc, script_fragment: frag });
-    STATE.synthAnalysis = analysis;
-    setProgress('synth-prog-bar', 'synth-prog-label', 45, '✦ Synthesizing Playwright TypeScript…');
-    renderAnalysis(analysis);
-    document.getElementById('synth-analysis').style.display = '';
+    // NEW: Call enhanced synthesis with validation
+    // This does: Generate → Run Local → Learn → Tune → Validate → Report
+    const result = await api('POST', '/synthesize/with-validation', { test_case: tc, script_fragment: frag });
 
-    // Step 2 — Generate
-    const { code } = await api('POST', '/synthesize/generate', { test_case: tc, script_fragment: frag });
-    STATE.synthCode = code;
-    setProgress('synth-prog-bar', 'synth-prog-label', 90, '✓ Script ready');
+    // Phase 1 progress
+    setProgress('synth-prog-bar', 'synth-prog-label', 35, '📊 Phase 1: Running locally with observer…');
 
-    document.getElementById('synth-code-pre').innerHTML = highlight(code);
+    if (result.phase1Pass) {
+      setProgress('synth-prog-bar', 'synth-prog-label', 55, '✓ Phase 1 passed');
+    } else {
+      setProgress('synth-prog-bar', 'synth-prog-label', 55, '⚠️ Phase 1: ' + result.phase1Message);
+    }
+
+    // Phase 2 & 3 progress
+    if (result.phase2Updated) {
+      setProgress('synth-prog-bar', 'synth-prog-label', 75, '✓ Phase 2: Tuned selectors');
+      setProgress('synth-prog-bar', 'synth-prog-label', 90, '✓ Phase 3: Validated tuned test');
+    } else {
+      setProgress('synth-prog-bar', 'synth-prog-label', 90, '✓ Validation complete');
+    }
+
+    // Store code (use tuned code if available, otherwise generated)
+    STATE.synthCode = result.tunedCode || result.generatedCode;
+    STATE.synthAnalysis = { steps: [], risks: [], healingStrategies: [] };
+
+    // Show workflow results before asking about golden
+    const workflowEl = document.createElement('div');
+    workflowEl.className = 'card';
+    workflowEl.style.marginTop = '20px';
+    workflowEl.innerHTML = `
+      <div class="card-title">🎯 Synthesis Workflow Results</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
+        <div style="background:${result.phase1Pass ? 'var(--pass-bg)' : 'var(--warn-bg)'};border:1px solid ${result.phase1Pass ? 'var(--pass-b)' : 'var(--warn-b)'};border-radius:8px;padding:12px">
+          <div style="font-size:12px;font-weight:600;color:${result.phase1Pass ? 'var(--pass-t)' : 'var(--warn-t)'};margin-bottom:4px">
+            ${result.phase1Pass ? '✅' : '⚠️'} Phase 1: Local Run
+          </div>
+          <div style="font-size:11px;color:${result.phase1Pass ? 'var(--pass-t)' : 'var(--warn-t)'}">
+            ${result.phase1Message || 'Test executed'}
+          </div>
+        </div>
+        <div style="background:${result.phase2Updated ? 'var(--pass-bg)' : 'var(--bg)'};border:1px solid ${result.phase2Updated ? 'var(--pass-b)' : 'var(--border)'};border-radius:8px;padding:12px">
+          <div style="font-size:12px;font-weight:600;color:${result.phase2Updated ? 'var(--pass-t)' : 'var(--text2)'};margin-bottom:4px">
+            ${result.phase2Updated ? '✅' : '⏭️'} Phase 2: Auto-Tune
+          </div>
+          <div style="font-size:11px;color:var(--text2)">
+            ${result.phase2Updated ? result.phase2Changes.length + ' selectors improved' : 'No tuning needed'}
+          </div>
+        </div>
+        <div style="background:${result.phase3Pass ? 'var(--pass-bg)' : 'var(--warn-bg)'};border:1px solid ${result.phase3Pass ? 'var(--pass-b)' : 'var(--warn-b)'};border-radius:8px;padding:12px">
+          <div style="font-size:12px;font-weight:600;color:${result.phase3Pass ? 'var(--pass-t)' : 'var(--warn-t)'};margin-bottom:4px">
+            ${result.phase3Pass ? '✅' : '⚠️'} Phase 3: Validate
+          </div>
+          <div style="font-size:11px;color:${result.phase3Pass ? 'var(--pass-t)' : 'var(--warn-t)'}">
+            ${result.phase3Message || 'Validation pending'}
+          </div>
+        </div>
+      </div>
+      <div style="background:${result.readyForGolden ? 'var(--pass-bg)' : 'var(--warn-bg)'};border:1px solid ${result.readyForGolden ? 'var(--pass-b)' : 'var(--warn-b)'};border-radius:8px;padding:14px;margin-bottom:16px">
+        <div style="font-size:13px;font-weight:600;color:${result.readyForGolden ? 'var(--pass-t)' : 'var(--warn-t)'};margin-bottom:4px">
+          ${result.readyForGolden ? '🎉 Ready for Golden' : '⚠️ Review Before Saving'}
+        </div>
+        <div style="font-size:12px;color:${result.readyForGolden ? 'var(--pass-t)' : 'var(--warn-t)'}">
+          ${result.recommendation}
+        </div>
+      </div>
+      ${result.phase2Changes.length > 0 ? `
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:16px">
+          <div style="font-size:12px;font-weight:600;color:var(--accent);margin-bottom:8px">Selector Improvements</div>
+          ${result.phase2Changes.map(c => `<div style="font-size:11px;color:var(--pass-t);margin-bottom:4px">✓ ${esc(c)}</div>`).join('')}
+        </div>
+      ` : ''}
+    `;
+
+    // Insert workflow results after progress
+    const synthResult = document.getElementById('synth-result');
+    synthResult.parentElement.insertBefore(workflowEl, synthResult);
+
+    // Update the generated code display
+    document.getElementById('synth-code-pre').innerHTML = highlight(STATE.synthCode);
     const slug = tc.split(' ').slice(0,3).join('-').toLowerCase().replace(/[^a-z0-9-]/g,'');
     document.getElementById('golden-name-input').value = slug + '.spec.ts';
 
+    // Update button state based on readiness
+    const saveBtn = document.querySelector('#synth-result .btn-success');
+    if (!result.readyForGolden) {
+      saveBtn.textContent = '⚠️ Review Issues First';
+      saveBtn.disabled = true;
+      saveBtn.style.opacity = '0.5';
+      saveBtn.style.cursor = 'not-allowed';
+    } else {
+      saveBtn.disabled = false;
+      saveBtn.style.opacity = '1';
+      saveBtn.style.cursor = 'pointer';
+    }
+
     document.getElementById('synth-progress').style.display = 'none';
     document.getElementById('synth-result').style.display = '';
+
   } catch (e) {
     showError('synth-error', e.message);
     document.getElementById('synth-progress').style.display = 'none';

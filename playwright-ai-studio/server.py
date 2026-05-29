@@ -3,11 +3,14 @@ Playwright AI Studio — Python/FastAPI backend
 Azure OpenAI powered test synthesis & auto-healing
 """
 
-import os, json, uuid, re, subprocess, tempfile
+import os, json, uuid, re, subprocess, tempfile, logging, base64
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mK]')
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import requests
+from playwright.async_api import async_playwright
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +23,81 @@ from dotenv import load_dotenv
 # ── Import improved healing engine ─────────────────────────────────────────────
 from healing_engine import ErrorSignature, generate_targeted_healing_prompt, analyze_healing_history
 
+# ── Configure Logging ──────────────────────────────────────────────────────────
 BASE = Path(__file__).parent
+LOGS_DIR = BASE / "logs"
+LOGS_DIR.mkdir(exist_ok=True)
+
+# Set up logger with both file and console handlers
+logger = logging.getLogger("playwright_ai_studio")
+logger.setLevel(logging.DEBUG)
+
+# File handler - daily synthesis log
+synthesis_log_file = LOGS_DIR / f"synthesis-{datetime.now().strftime('%Y-%m-%d')}.log"
+file_handler = logging.FileHandler(synthesis_log_file)
+file_handler.setLevel(logging.DEBUG)
+
+# JSON structured log handler
+json_log_file = LOGS_DIR / "synthesis-results.jsonl"
+json_handler = logging.FileHandler(json_log_file)
+json_handler.setLevel(logging.DEBUG)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Formatter
+formatter = logging.Formatter(
+    '%(asctime)s - %(levelname)s - [%(funcName)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# ── Ensure Playwright browsers are installed for this Python venv ──────────────
+try:
+    _pw_check = subprocess.run(
+        ["python", "-m", "playwright", "install", "chromium"],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(BASE)
+    )
+    if _pw_check.returncode != 0:
+        logger.warning(f"playwright install chromium warning: {_pw_check.stderr[:200]}")
+    else:
+        logger.info("Playwright chromium browser ready")
+except Exception as _pw_err:
+    logger.warning(f"Could not verify Playwright browser install: {_pw_err}")
+
+def _strip_ansi(text):
+    if isinstance(text, str):
+        return _ANSI_RE.sub('', text)
+    return text
+
+def _clean_details(obj):
+    if isinstance(obj, dict):
+        return {k: _clean_details(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean_details(v) for v in obj]
+    return _strip_ansi(obj)
+
+def log_json_result(phase, status, message, details=None):
+    """Log structured JSON result to synthesis-results.jsonl"""
+    try:
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "phase": phase,
+            "status": status,
+            "message": _strip_ansi(message),
+            "details": _clean_details(details or {})
+        }
+        with open(json_log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+    except Exception as e:
+        logger.error(f"Failed to write JSON log: {e}")
+
 ROOT_ENV = BASE.parent / ".env"
 load_dotenv()
 if ROOT_ENV.exists():
@@ -35,13 +112,15 @@ client = AzureOpenAI(
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
 # ── Storage paths ─────────────────────────────────────────────────────────────
-BASE           = Path(__file__).parent
 GOLDEN_DIR     = BASE / "golden"
 RUNS_DIR       = BASE / "runs"
 HEALING_DIR    = BASE / "healing_history"  # Track all healing attempts
 GOLDEN_DIR.mkdir(exist_ok=True)
 RUNS_DIR.mkdir(exist_ok=True)
 HEALING_DIR.mkdir(exist_ok=True)
+
+# ── Synthesis tuning ─────────────────────────────────────────────────────────
+MAX_HEAL_ROUNDS = 3  # Max Phase-1/2 retry cycles before giving up
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Playwright AI Studio", version="1.0.0")
@@ -240,12 +319,14 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
             if result.stderr:
                 print(f"[validation] Stderr: {result.stderr[:500]}")
 
-            # Parse JSON result
+            # Parse JSON result — stdout contains [validate] log lines before the JSON
             try:
-                output = json.loads(result.stdout)
-                return output
-            except json.JSONDecodeError as e:
-                # If JSON parsing fails, return the raw output as error
+                for line in reversed(result.stdout.strip().splitlines()):
+                    line = line.strip()
+                    if line.startswith('{'):
+                        return json.loads(line)
+                raise json.JSONDecodeError("No JSON line found in output", result.stdout, 0)
+            except json.JSONDecodeError:
                 return {
                     "status": "ERROR",
                     "error": f"Failed to parse validation result: {result.stdout[:500]}",
@@ -343,6 +424,617 @@ Output ONLY the TypeScript code. No markdown fences.""",
         max_tokens=1500,
     )
     return {"code": code}
+
+# ─ Vision Analysis with Azure GPT-4V ──────────────────────────────────────────
+async def analyze_page_with_vision(url: str, test_description: str) -> str:
+    """
+    Navigate to page, capture screenshot, analyze with Azure GPT-4V Vision
+
+    Returns: Generated TypeScript test code
+    """
+    pb = None
+    browser = None
+
+    try:
+        logger.info(f"[VISION] Starting page analysis for {url}")
+
+        # Launch browser
+        pb = await async_playwright().start()
+        browser = await pb.chromium.launch()
+        page = await browser.new_page()
+
+        # Navigate to page
+        logger.info(f"[VISION] Navigating to {url}")
+        await page.goto(url, wait_until='networkidle', timeout=30000)
+        logger.info("[VISION] ✅ Page loaded")
+
+        # Capture screenshot
+        screenshot_bytes = await page.screenshot()
+        screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+        logger.info(f"[VISION] ✅ Screenshot captured ({len(screenshot_bytes)} bytes)")
+
+        # Close browser
+        await browser.close()
+        await pb.stop()
+
+        # Send to GPT-4V for analysis
+        logger.info("[VISION] Sending to GPT-4V for analysis...")
+
+        response = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{screenshot_b64}"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": f"""You are analyzing a webpage screenshot to generate a Playwright test.
+
+WEBPAGE: [Screenshot above]
+
+TEST INSTRUCTIONS:
+{test_description}
+
+TASK:
+1. Carefully analyze the webpage structure visible in the screenshot
+2. Identify the exact selectors for all elements mentioned in the instructions
+3. Note where buttons, tabs, text, links, forms are located
+4. Generate a complete, valid TypeScript test for Playwright
+
+RULES:
+- Use only selectors you can see in the screenshot
+- Prefer getByRole(), getByText(), getByLabel() selectors
+- Use page.locator() for complex selectors
+- Include proper waits: page.waitForLoadState(), locator.waitFor()
+- Add comments explaining each step
+- Code must be completely valid and runnable
+
+OUTPUT:
+Return ONLY the TypeScript code. No markdown, no explanations.
+
+```typescript
+import {{ test, expect }} from '@playwright/test';
+
+test.describe('Page Test', () => {{
+  test('user interaction test', async ({{ page }}) => {{
+    // Your code here
+  }});
+}});
+```"""
+                        }
+                    ]
+                }
+            ],
+            max_tokens=2000,
+            temperature=0.2
+        )
+
+        generated_code = response.choices[0].message.content.strip()
+        logger.info(f"[VISION] ✅ Code generated ({len(generated_code)} chars)")
+
+        return generated_code
+
+    except Exception as e:
+        logger.error(f"[VISION] ❌ Error: {str(e)}")
+        raise
+
+    finally:
+        # Cleanup
+        if browser:
+            await browser.close()
+        if pb:
+            await pb.stop()
+
+# ─ NEW: Enhanced Synthesis with Local Validation ─────────────────────────────
+@app.post("/api/synthesize/with-validation")
+async def synthesize_with_validation(req: SynthesizeRequest):
+    """
+    ENHANCED WORKFLOW: Synthesize → Run Local → Learn → Tune → Validate → Ready for Golden
+
+    Instead of: Generate → Ask to save
+    Now: Generate → Run → Learn → Tune → Validate → "Ready for golden?"
+
+    Returns:
+        {
+            "generatedCode": "...",
+            "phase1Pass": true/false,
+            "phase1Message": "Test ran successfully",
+            "phase2Updated": true/false,
+            "phase2Changes": ["Changed selector A", "Changed selector B"],
+            "tuned Code": "...",
+            "phase3Pass": true/false,
+            "phase3Message": "Validation passed!",
+            "readyForGolden": true/false,
+            "recommendation": "✅ Ready to save as golden!" or "⚠️ Review issues before saving"
+        }
+    """
+    try:
+        logger.info(f"\n{'='*80}")
+        logger.info("SYNTHESIS WORKFLOW STARTED")
+        logger.info(f"{'='*80}")
+        logger.info(f"Test Description: {req.test_case[:100]}...")
+
+        log_json_result("START", "INFO", "Synthesis workflow initiated", {
+            "test_description": req.test_case[:200],
+            "timestamp": datetime.now().isoformat()
+        })
+
+        # ─── PHASE 0: SYNTHESIZE WITH VISION (Azure GPT-4V) ──────────────────────
+        logger.info("[PHASE 0] Synthesizing test with vision analysis (GPT-4V)...")
+        log_json_result(0, "IN_PROGRESS", "Synthesizing with vision", {})
+
+        try:
+            # Extract URL from test description
+            url_match = re.search(r'https?://[^\s]+', req.test_case)
+            if not url_match:
+                raise ValueError("No URL found in test description")
+
+            url = url_match.group(0)
+            logger.info(f"[PHASE 0] Detected URL: {url}")
+
+            # Phase 0A: Navigate and capture screenshot
+            logger.info("[PHASE 0A] Navigating to page and capturing screenshot...")
+
+            pb = await async_playwright().start()
+            browser = await pb.chromium.launch()
+            page = await browser.new_page()
+
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+            logger.info("[PHASE 0A] ✅ Page loaded")
+
+            screenshot_bytes = await page.screenshot()
+            screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+            logger.info(f"[PHASE 0A] ✅ Screenshot captured")
+
+            await browser.close()
+            await pb.stop()
+
+            # Phase 0B: Analyze with GPT-4V and generate code
+            logger.info("[PHASE 0B] Analyzing with Azure GPT-4V Vision...")
+
+            response = client.chat.completions.create(
+                model=DEPLOYMENT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{screenshot_b64}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": f"""Analyze this webpage and generate a Playwright test.
+
+TEST INSTRUCTIONS:
+{req.test_case}
+
+Generate complete, valid TypeScript code using selectors visible in the screenshot.
+
+SELECTOR RULES (in order of preference):
+1. For navigation tabs/menu items: use page.locator('a[role="menuitem"]').filter({{hasText: "..."}}) — many sites use role="menuitem" not role="link" on nav tabs.
+2. For buttons: getByRole('button', {{ name: '...' }})
+3. For links with href: page.locator('a[href*="keyword"]')
+4. For text content: getByText('...', {{ exact: true }})
+5. Avoid getByRole('link') for navigation tabs — it breaks on sites that use role="menuitem".
+
+Include proper waits and error handling.
+Output ONLY the code, no markdown or explanations."""
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=2000,
+                temperature=0.2
+            )
+
+            generated_code = response.choices[0].message.content.strip()
+            logger.info(f"[PHASE 0B] ✅ Code generated with vision ({len(generated_code)} chars)")
+
+        except Exception as e:
+            logger.error(f"[PHASE 0] ❌ Vision synthesis failed: {str(e)}")
+            log_json_result(0, "FAILED", f"Vision synthesis error: {str(e)}", {})
+            return {
+                "error": f"Phase 0 Vision Synthesis failed: {str(e)}",
+                "generatedCode": "",
+                "phase1Pass": False,
+                "phase1Message": f"Phase 0 failed: {str(e)}",
+                "phase2Updated": False,
+                "phase2Changes": [],
+                "tunedCode": "",
+                "phase3Pass": False,
+                "phase3Message": "Not run (Phase 0 failed)",
+                "readyForGolden": False,
+                "recommendation": f"Vision analysis error: {str(e)}"
+            }
+
+        generated_code = generated_code.strip()
+        logger.info(f"[PHASE 0] ✅ Code generated successfully ({len(generated_code)} chars, {len(generated_code.split(chr(10)))} lines)")
+        log_json_result(0, "SUCCESS", "Test code generated with Azure GPT-4V Vision", {
+            "code_length": len(generated_code),
+            "line_count": len(generated_code.split('\n')),
+            "code_preview": generated_code[:500],
+            "method": "Azure GPT-4V Vision"
+        })
+
+        # ─── PHASE 1+2 LOOP: Run → Fail → Vision-heal, up to MAX_HEAL_ROUNDS ─────
+        # Each iteration: run the test (Phase 1.R), and if it fails take a fresh
+        # screenshot so GPT-4V can see the live page before proposing a fix (Phase 2.R).
+        current_code  = generated_code
+        phase1_pass   = False
+        phase1_message = "Not run"
+        heal_history  = []   # full audit trail of every round
+
+        for round_num in range(1, MAX_HEAL_ROUNDS + 1):
+            is_last_round = (round_num == MAX_HEAL_ROUNDS)
+
+            # ── Phase 1.R: run test ────────────────────────────────────────────
+            logger.info(f"[PHASE 1 · Round {round_num}/{MAX_HEAL_ROUNDS}] Running test locally...")
+            log_json_result(
+                f"1.{round_num}", "IN_PROGRESS",
+                f"Round {round_num}/{MAX_HEAL_ROUNDS}: running test",
+                {"round": round_num, "code_chars": len(current_code)}
+            )
+
+            p1_result  = await validate_test_locally(current_code, f"synthesis_temp_r{round_num}")
+            phase1_pass    = p1_result.get("passed", False)
+            phase1_message = p1_result.get("error") or "Test executed successfully"
+            p1_duration    = p1_result.get("duration", 0)
+
+            round_entry = {
+                "round":          round_num,
+                "passed":         phase1_pass,
+                "error":          phase1_message,
+                "duration_secs":  p1_duration,
+                "code_preview":   current_code[:300],
+                "screenshot_for_heal": False,
+            }
+
+            if phase1_pass:
+                logger.info(
+                    f"[PHASE 1 · Round {round_num}] ✅ PASSED in {p1_duration}s"
+                )
+                log_json_result(
+                    f"1.{round_num}", "SUCCESS",
+                    f"Round {round_num}: test passed",
+                    {"round": round_num, "duration_secs": p1_duration,
+                     "code_chars": len(current_code)}
+                )
+                generated_code = current_code
+                heal_history.append(round_entry)
+                break
+
+            # Test failed
+            logger.error(
+                f"[PHASE 1 · Round {round_num}] ❌ FAILED — {phase1_message}"
+            )
+            log_json_result(
+                f"1.{round_num}", "FAILED",
+                f"Round {round_num}: test failed",
+                {"round": round_num, "duration_secs": p1_duration,
+                 "error_details": phase1_message,
+                 "code_preview": current_code[:400]}
+            )
+
+            if is_last_round:
+                logger.error(
+                    f"[PHASE 1+2] Max rounds ({MAX_HEAL_ROUNDS}) exhausted — giving up"
+                )
+                log_json_result(
+                    "1.FINAL", "FAILED",
+                    f"All {MAX_HEAL_ROUNDS} rounds failed",
+                    {"total_rounds": MAX_HEAL_ROUNDS,
+                     "final_error": phase1_message,
+                     "heal_history": heal_history}
+                )
+                heal_history.append(round_entry)
+                break
+
+            # ── Phase 2.R: vision-assisted healing ────────────────────────────
+            logger.info(
+                f"[PHASE 2 · Round {round_num}] Capturing live screenshot for GPT-4V healing..."
+            )
+            log_json_result(
+                f"2.{round_num}", "IN_PROGRESS",
+                f"Round {round_num}: vision-assisted healing",
+                {"round": round_num}
+            )
+
+            try:
+                # Navigate to the page and capture current state so the LLM
+                # sees exactly what is on screen before proposing a selector fix
+                pb2      = await async_playwright().start()
+                browser2 = await pb2.chromium.launch()
+                page2    = await browser2.new_page()
+                await page2.goto(url, wait_until='networkidle', timeout=30000)
+                heal_shot_bytes = await page2.screenshot(full_page=False)
+                heal_shot_b64   = base64.b64encode(heal_shot_bytes).decode('utf-8')
+                await browser2.close()
+                await pb2.stop()
+
+                logger.info(
+                    f"[PHASE 2 · Round {round_num}] ✅ Screenshot captured "
+                    f"({len(heal_shot_bytes)//1024}KB) — sending to GPT-4V"
+                )
+                round_entry["screenshot_for_heal"] = True
+                round_entry["screenshot_kb"] = len(heal_shot_bytes) // 1024
+
+                heal_response = client.chat.completions.create(
+                    model=DEPLOYMENT,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{heal_shot_b64}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": f"""This Playwright test failed (Round {round_num} of {MAX_HEAL_ROUNDS}).
+Look at the screenshot to identify the correct element, then fix the test.
+
+FAILURE ERROR:
+{phase1_message}
+
+CURRENT BROKEN CODE:
+{current_code}
+
+SELECTOR RULES (use in this order):
+1. Nav tabs/menu items → page.locator('a[role="menuitem"]').filter({{hasText: "Label"}})
+2. Buttons            → getByRole('button', {{ name: '...' }})
+3. Links with href    → page.locator('a[href*="keyword"]')
+4. Plain text         → getByText('...', {{ exact: true }})
+❌ NEVER use getByRole('link') for navigation tabs — those elements use role="menuitem".
+
+Study the screenshot carefully. Identify the exact element the test is trying to reach.
+Fix only the broken selector/action. Keep all other test logic unchanged.
+Output ONLY the corrected TypeScript code. No markdown fences."""
+                            }
+                        ]
+                    }],
+                    max_tokens=2000,
+                    temperature=0.2
+                )
+
+                new_code = heal_response.choices[0].message.content.strip()
+                new_code = re.sub(r"```(?:typescript|ts|js)?[\n]?", "", new_code).strip()
+                new_code = re.sub(r"```$", "", new_code).strip()
+
+                if new_code and new_code != current_code:
+                    logger.info(
+                        f"[PHASE 2 · Round {round_num}] ✅ Healed code received "
+                        f"({len(new_code)} chars) — will test in Round {round_num + 1}"
+                    )
+                    round_entry["healed_code_preview"] = new_code[:300]
+                    log_json_result(
+                        f"2.{round_num}", "SUCCESS",
+                        f"Round {round_num}: GPT-4V healing applied",
+                        {"round": round_num,
+                         "screenshot_kb": round_entry["screenshot_kb"],
+                         "code_changed": True,
+                         "prev_chars": len(current_code),
+                         "new_chars": len(new_code),
+                         "new_code_preview": new_code[:400]}
+                    )
+                    current_code = new_code
+                else:
+                    logger.warning(
+                        f"[PHASE 2 · Round {round_num}] ⚠️  LLM returned identical code — stopping loop"
+                    )
+                    log_json_result(
+                        f"2.{round_num}", "WARN",
+                        f"Round {round_num}: LLM returned no changes",
+                        {"round": round_num}
+                    )
+                    heal_history.append(round_entry)
+                    break
+
+            except Exception as heal_err:
+                logger.error(
+                    f"[PHASE 2 · Round {round_num}] ❌ Healing error: {heal_err}"
+                )
+                log_json_result(
+                    f"2.{round_num}", "ERROR",
+                    f"Round {round_num}: healing failed",
+                    {"round": round_num, "error": str(heal_err)}
+                )
+                heal_history.append(round_entry)
+                break
+
+            heal_history.append(round_entry)
+
+        # ─── PHASE TUNE: Selector-confidence tuning (runs only after loop passes) ─
+        tuned_code    = generated_code
+        phase2_updated = False
+        phase2_changes = []
+
+        if phase1_pass:
+            logger.info("[PHASE TUNE] Analyzing learning data for selector confidence...")
+            log_json_result("TUNE", "IN_PROGRESS", "Analyzing selectors for tuning", {})
+
+            learning_file = BASE.parent / ".learning" / "synthesis_temp.learning-results.json"
+
+            if learning_file.exists():
+                try:
+                    learning_data   = json.loads(learning_file.read_text())
+                    selector_stats  = learning_data.get("selectorStats", [])
+                    low_confidence  = [s for s in selector_stats if s.get("confidence", 0) < 75]
+
+                    if low_confidence:
+                        logger.info(
+                            f"[PHASE TUNE] {len(low_confidence)} low-confidence selectors to optimize"
+                        )
+                        for s in low_confidence:
+                            logger.debug(f"  - {s.get('selector')} ({s.get('confidence')}%)")
+
+                        tune_prompt = ask_llm(
+                            system="""You are a Playwright selector optimization expert.
+Given test code and low-confidence selectors, suggest high-confidence alternatives.
+Return ONLY JSON: {"suggestions": [{"old": "selector", "new": "better selector", "reason": "why"}]}""",
+                            user=(
+                                f"Test code:\n{generated_code}\n\n"
+                                f"Low-confidence selectors:\n"
+                                + json.dumps([{"selector": s["selector"], "confidence": s.get("confidence")}
+                                              for s in low_confidence])
+                            ),
+                            max_tokens=800,
+                        )
+
+                        try:
+                            tune_data   = json.loads(re.sub(r"```(?:json)?|```", "", tune_prompt).strip())
+                            suggestions = tune_data.get("suggestions", [])
+
+                            if suggestions:
+                                tuned_code = generated_code
+                                for i, sg in enumerate(suggestions, 1):
+                                    old, new, reason = sg.get("old",""), sg.get("new",""), sg.get("reason","")
+                                    if old and new:
+                                        tuned_code = tuned_code.replace(old, new)
+                                        msg = f"Improved: {old} → {new}"
+                                        phase2_changes.append(msg)
+                                        phase2_updated = True
+                                        logger.info(f"  [{i}] {msg} ({reason})")
+
+                                logger.info(f"[PHASE TUNE] ✅ Applied {len(suggestions)} improvements")
+                                log_json_result("TUNE", "SUCCESS",
+                                    f"Applied {len(suggestions)} selector improvements",
+                                    {"improvements": phase2_changes,
+                                     "reasons": [s.get("reason","") for s in suggestions]})
+                            else:
+                                log_json_result("TUNE", "SKIPPED", "All selectors already optimal", {})
+
+                        except Exception as e:
+                            logger.error(f"[PHASE TUNE] ⚠️  Could not parse tuning suggestions: {e}")
+                            log_json_result("TUNE", "ERROR", "Failed to parse tuning suggestions",
+                                            {"error": str(e)})
+                    else:
+                        logger.info("[PHASE TUNE] All selectors high-confidence — no tuning needed")
+                        log_json_result("TUNE", "SKIPPED", "All selectors confident",
+                                        {"reason": "All > 75% confidence"})
+
+                except Exception as e:
+                    logger.error(f"[PHASE TUNE] ⚠️  Could not analyze learning data: {e}")
+                    log_json_result("TUNE", "ERROR", "Failed to analyze learning data", {"error": str(e)})
+            else:
+                logger.info("[PHASE TUNE] No learning data — skipping")
+                log_json_result("TUNE", "SKIPPED", "No learning data",
+                                {"learning_file": str(learning_file)})
+        else:
+            logger.info("[PHASE TUNE] ⏭️  Skipped — loop did not pass")
+            log_json_result("TUNE", "SKIPPED", "Loop failed", {"heal_rounds": len(heal_history)})
+
+        # ─── PHASE 3: VALIDATE TUNED TEST ─────────────────────────────────────
+        phase3_pass    = False
+        phase3_message = "Not run (loop did not pass)"
+
+        if phase1_pass and phase2_updated:
+            logger.info("[PHASE 3] Validating tuned test code...")
+            log_json_result(3, "IN_PROGRESS", "Re-validating tuned code", {})
+
+            phase3_result  = await validate_test_locally(tuned_code, "synthesis_temp_tuned")
+            phase3_pass    = phase3_result.get("passed", False)
+            phase3_message = phase3_result.get("error") or "Validation passed"
+
+            if phase3_pass:
+                logger.info(f"[PHASE 3] ✅ TUNED TEST VALIDATED")
+                log_json_result(3, "SUCCESS", "Tuned test validated",
+                                {"execution_time": phase3_result.get("duration", "unknown")})
+            else:
+                logger.error(f"[PHASE 3] ❌ VALIDATION FAILED — {phase3_message}")
+                log_json_result(3, "FAILED", "Tuned test validation failed",
+                                {"error": phase3_message})
+        elif phase1_pass:
+            phase3_pass    = True
+            phase3_message = "Validation passed (no tuning applied)"
+            logger.info("[PHASE 3] ✅ PASSED (no tuning needed)")
+            log_json_result(3, "SKIPPED", "No tuning was applied",
+                            {"reason": "Phase TUNE found no changes needed"})
+        else:
+            logger.info(f"[PHASE 3] ⏭️  Skipped — loop did not pass after {len(heal_history)} rounds")
+            log_json_result(3, "SKIPPED", "Loop did not pass",
+                            {"heal_rounds": len(heal_history),
+                             "heal_history": heal_history})
+
+        # ─── DECISION: Ready for golden? ───────────────────────────────────────
+        ready_for_golden = phase1_pass and phase3_pass
+
+        if ready_for_golden:
+            recommendation = "✅ Ready to save as GOLDEN! All phases passed."
+            logger.info(f"[DECISION] {recommendation}")
+        elif phase1_pass and not phase3_pass:
+            recommendation = "⚠️  Review Phase 3 validation failure before saving"
+            logger.warning(f"[DECISION] {recommendation}")
+        else:
+            recommendation = "⚠️  Fix Phase 1 issues before saving as golden"
+            logger.warning(f"[DECISION] {recommendation}")
+
+        logger.info(f"{'='*80}")
+        logger.info("SYNTHESIS WORKFLOW COMPLETED")
+        logger.info(f"{'='*80}\n")
+
+        heal_rounds_used  = len(heal_history)
+        heal_rounds_passed = sum(1 for h in heal_history if h.get("passed"))
+
+        log_json_result("END", "SUCCESS" if ready_for_golden else "REVIEW",
+                       recommendation, {
+                           "phase1_pass": phase1_pass,
+                           "phase2_updated": phase2_updated,
+                           "phase3_pass": phase3_pass,
+                           "ready_for_golden": ready_for_golden,
+                           "heal_rounds_used": heal_rounds_used,
+                           "heal_rounds_passed": heal_rounds_passed,
+                           "heal_history": heal_history,
+                           "code_summary": {
+                               "generated_chars": len(generated_code),
+                               "tuned_chars": len(tuned_code),
+                               "changes_count": len(phase2_changes)
+                           }
+                       })
+
+        return {
+            "generatedCode": generated_code,
+            "phase1Pass": phase1_pass,
+            "phase1Message": phase1_message,
+            "phase2Updated": phase2_updated,
+            "phase2Changes": phase2_changes,
+            "tunedCode": tuned_code if phase2_updated else generated_code,
+            "phase3Pass": phase3_pass,
+            "phase3Message": phase3_message,
+            "readyForGolden": ready_for_golden,
+            "recommendation": recommendation,
+            "healRoundsUsed": heal_rounds_used,
+            "healHistory": heal_history,
+        }
+
+    except Exception as e:
+        logger.error(f"[SYNTHESIS ERROR] ❌ Fatal error during workflow: {str(e)}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        logger.error(f"[TRACEBACK]\n{error_traceback}")
+
+        log_json_result("ERROR", "FAILED", "Fatal synthesis error", {
+            "error": str(e),
+            "traceback": error_traceback,
+            "timestamp": datetime.now().isoformat()
+        })
+
+        return {
+            "error": str(e),
+            "readyForGolden": False,
+            "recommendation": f"Error during synthesis: {str(e)}",
+            "phase1Pass": False,
+        }, 500
+
 
 # ─ Save as Golden ──────────────────────────────────────────────────────────────
 @app.post("/api/goldens")
