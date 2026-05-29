@@ -8,7 +8,7 @@ import os, json, uuid, re, subprocess, tempfile, logging, base64
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mK]')
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 import requests
 from playwright.async_api import async_playwright
 
@@ -425,6 +425,30 @@ Output ONLY the TypeScript code. No markdown fences.""",
     )
     return {"code": code}
 
+# ─ Shared: capture a screenshot from a URL for LLM context ───────────────────
+async def capture_screenshot_b64(url: str, label: str = "") -> Optional[str]:
+    """Navigate to url, return base64 PNG or None on failure."""
+    try:
+        pb = await async_playwright().start()
+        browser = await pb.chromium.launch()
+        page = await browser.new_page()
+        for _w, _t in [('domcontentloaded', 30000), ('load', 30000), ('commit', 45000)]:
+            try:
+                await page.goto(url, wait_until=_w, timeout=_t)
+                break
+            except Exception:
+                pass
+        await page.wait_for_timeout(2000)
+        shot = await page.screenshot(full_page=False)
+        await browser.close()
+        await pb.stop()
+        tag = f"[{label}] " if label else ""
+        logger.info(f"{tag}✅ Heal screenshot captured ({len(shot)//1024}KB) from {url}")
+        return base64.b64encode(shot).decode('utf-8')
+    except Exception as e:
+        logger.warning(f"[capture_screenshot_b64] ⚠️  Could not capture screenshot from {url}: {e}")
+        return None
+
 # ─ Vision Analysis with Azure GPT-4V ──────────────────────────────────────────
 async def analyze_page_with_vision(url: str, test_description: str) -> str:
     """
@@ -443,11 +467,17 @@ async def analyze_page_with_vision(url: str, test_description: str) -> str:
         browser = await pb.chromium.launch()
         page = await browser.new_page()
 
-        # Navigate to page
+        # Navigate to page with fallback strategies
         logger.info(f"[VISION] Navigating to {url}")
-        await page.goto(url, wait_until='networkidle', timeout=30000)
-        logger.info("[VISION] ✅ Page loaded")
+        for _w, _t in [('domcontentloaded', 30000), ('load', 30000), ('commit', 45000)]:
+            try:
+                await page.goto(url, wait_until=_w, timeout=_t)
+                logger.info(f"[VISION] ✅ Page loaded (wait_until='{_w}')")
+                break
+            except Exception as _e:
+                logger.warning(f"[VISION] ⚠️  '{_w}' timed out — trying next ({_e})")
 
+        await page.wait_for_timeout(2000)
         # Capture screenshot
         screenshot_bytes = await page.screenshot()
         screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
@@ -585,9 +615,27 @@ async def synthesize_with_validation(req: SynthesizeRequest):
             browser = await pb.chromium.launch()
             page = await browser.new_page()
 
-            await page.goto(url, wait_until='networkidle', timeout=30000)
-            logger.info("[PHASE 0A] ✅ Page loaded")
+            # Try progressively more lenient wait strategies so sites with
+            # continuous background requests (news, finance) don't time out.
+            _strategies = [
+                ('domcontentloaded', 30000),
+                ('load', 30000),
+                ('commit', 45000),
+            ]
+            _loaded = False
+            for _wait, _timeout in _strategies:
+                try:
+                    await page.goto(url, wait_until=_wait, timeout=_timeout)
+                    logger.info(f"[PHASE 0A] ✅ Page loaded (wait_until='{_wait}')")
+                    _loaded = True
+                    break
+                except Exception as _nav_err:
+                    logger.warning(f"[PHASE 0A] ⚠️  '{_wait}' timed out — trying next strategy ({_nav_err})")
+            if not _loaded:
+                raise RuntimeError(f"Could not load {url} with any wait strategy")
 
+            # Brief pause so JS-rendered elements appear in the screenshot
+            await page.wait_for_timeout(2000)
             screenshot_bytes = await page.screenshot()
             screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
             logger.info(f"[PHASE 0A] ✅ Screenshot captured")
@@ -649,6 +697,7 @@ Output ONLY the code, no markdown or explanations."""
                 "phase1Message": f"Phase 0 failed: {str(e)}",
                 "phase2Updated": False,
                 "phase2Changes": [],
+                "phase2SkipReason": "Phase 0 failed — no code generated",
                 "tunedCode": "",
                 "phase3Pass": False,
                 "phase3Message": "Not run (Phase 0 failed)",
@@ -754,7 +803,13 @@ Output ONLY the code, no markdown or explanations."""
                 pb2      = await async_playwright().start()
                 browser2 = await pb2.chromium.launch()
                 page2    = await browser2.new_page()
-                await page2.goto(url, wait_until='networkidle', timeout=30000)
+                for _w, _t in [('domcontentloaded', 30000), ('load', 30000), ('commit', 45000)]:
+                    try:
+                        await page2.goto(url, wait_until=_w, timeout=_t)
+                        break
+                    except Exception:
+                        pass
+                await page2.wait_for_timeout(2000)
                 heal_shot_bytes = await page2.screenshot(full_page=False)
                 heal_shot_b64   = base64.b64encode(heal_shot_bytes).decode('utf-8')
                 await browser2.close()
@@ -1001,12 +1056,21 @@ Return ONLY JSON: {"suggestions": [{"old": "selector", "new": "better selector",
                            }
                        })
 
+        # Build a human-readable reason for why Phase 2 did/didn't run
+        if phase2_updated:
+            phase2_skip_reason = None
+        elif not phase1_pass:
+            phase2_skip_reason = f"Skipped — test failed after {heal_rounds_used} round(s)"
+        else:
+            phase2_skip_reason = "No tuning needed — all selectors already optimal"
+
         return {
             "generatedCode": generated_code,
             "phase1Pass": phase1_pass,
             "phase1Message": phase1_message,
             "phase2Updated": phase2_updated,
             "phase2Changes": phase2_changes,
+            "phase2SkipReason": phase2_skip_reason,
             "tunedCode": tuned_code if phase2_updated else generated_code,
             "phase3Pass": phase3_pass,
             "phase3Message": phase3_message,
@@ -1175,24 +1239,50 @@ For "Locators must belong to the same frame" error:
   ✅ DO: Use .first() to disambiguate, not .or() for different selector types
 """
 
+    # ── Vision: capture live screenshot so GPT-4V sees the current page ─────────
+    url_match = re.search(r'https?://[^\s\'"]+', golden.get("code", ""))
+    heal_screenshot_b64 = None
+    if url_match:
+        heal_screenshot_b64 = await capture_screenshot_b64(url_match.group(0), label="heal")
+
     system_prompt = """You are a Playwright auto-healing expert.
-Given failure error messages and the original golden TypeScript script, produce an improved script.
+Given failure error messages, a live screenshot of the page, and the original golden TypeScript script, produce an improved script.
+Study the screenshot carefully — use it to identify the correct selectors for broken elements.
 For every fix, add an inline comment starting exactly with [AI-HEAL] explaining what changed and why.
 Key healing patterns:
   - Use only page.locator() chains to stay in same frame
   - .first() for ambiguous multi-match locators
   - waitForLoadState for timing gaps
   - try/catch with fallback click strategies
+  - For nav tabs visible in screenshot: prefer page.locator('a[role="menuitem"]').filter({hasText:"..."}) or a[href*="keyword"]
 
 CRITICAL: Avoid mixing different selector types (getByRole + locator) in same chain.
 All selectors in a chain must operate in the same frame context.
 Output ONLY the TypeScript code. No markdown."""
 
-    healed_code = ask_llm(
-        system=system_prompt,
-        user=f"""Errors:\n{error_summary}\n\nOriginal golden script:\n{golden['code']}{learning_context}""",
-        max_tokens=1500,
-    )
+    if heal_screenshot_b64:
+        logger.info(f"[heal] Sending screenshot + error to GPT-4V for vision-assisted healing")
+        heal_response = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{heal_screenshot_b64}"}},
+                    {"type": "text", "text": f"{system_prompt}\n\nErrors:\n{error_summary}\n\nOriginal golden script:\n{golden['code']}{learning_context}"}
+                ]
+            }],
+            max_tokens=1500,
+            temperature=0.2
+        )
+        healed_code = heal_response.choices[0].message.content.strip()
+        logger.info(f"[heal] ✅ Vision-assisted heal response received ({len(healed_code)} chars)")
+    else:
+        logger.info(f"[heal] No screenshot available — falling back to text-only healing")
+        healed_code = ask_llm(
+            system=system_prompt,
+            user=f"""Errors:\n{error_summary}\n\nOriginal golden script:\n{golden['code']}{learning_context}""",
+            max_tokens=1500,
+        )
 
     # Strip markdown fences if LLM wrapped code in them
     healed_code = re.sub(r"```(?:typescript|ts|js)?[\n]?", "", healed_code).strip()
@@ -1322,11 +1412,35 @@ Strategy: Apply targeted fix for '{root_cause}' instead of generic selector fixe
             learning_context
         )
 
-        healed_code = ask_llm(
-            system=system_prompt,
-            user=user_prompt,
-            max_tokens=1500,
-        )
+        # ── Vision: capture live screenshot so GPT-4V sees the current page ──
+        hv_url_match = re.search(r'https?://[^\s\'"]+', golden.get("code", ""))
+        hv_screenshot_b64 = None
+        if hv_url_match:
+            hv_screenshot_b64 = await capture_screenshot_b64(hv_url_match.group(0), label="heal-validate")
+
+        if hv_screenshot_b64:
+            logger.info(f"[heal-validate] Sending screenshot + error to GPT-4V (vision-assisted)")
+            hv_response = client.chat.completions.create(
+                model=DEPLOYMENT,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{hv_screenshot_b64}"}},
+                        {"type": "text", "text": f"{system_prompt}\n\n{user_prompt}"}
+                    ]
+                }],
+                max_tokens=1500,
+                temperature=0.2
+            )
+            healed_code = hv_response.choices[0].message.content.strip()
+            logger.info(f"[heal-validate] ✅ Vision-assisted heal response received ({len(healed_code)} chars)")
+        else:
+            logger.info(f"[heal-validate] No screenshot — falling back to text-only healing")
+            healed_code = ask_llm(
+                system=system_prompt,
+                user=user_prompt,
+                max_tokens=1500,
+            )
 
         # Strip markdown fences if LLM wrapped code in them
         healed_code = re.sub(r"```(?:typescript|ts|js)?[\n]?", "", healed_code).strip()

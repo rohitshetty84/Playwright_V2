@@ -728,6 +728,23 @@ async function runSynthesize() {
     workflowEl.style.marginTop = '20px';
     workflowEl.innerHTML = `
       <div class="card-title">🎯 Synthesis Workflow Results</div>
+
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Test Case Description</div>
+          <button onclick="
+            const tc = document.getElementById('synth-tc');
+            tc.value = this.dataset.tc;
+            document.getElementById('synth-form').style.display = '';
+            document.getElementById('synth-progress').style.display = 'none';
+            this.closest('.card').remove();
+            document.getElementById('synth-result').style.display = 'none';
+            tc.focus();
+          " data-tc="${esc(tc)}" style="font-size:11px;padding:3px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--accent);cursor:pointer;white-space:nowrap">✏️ Edit &amp; Re-run</button>
+        </div>
+        <div style="font-size:12px;color:var(--text);margin-top:6px;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow-y:auto">${esc(tc)}</div>
+      </div>
+
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
         <div style="background:${result.phase1Pass ? 'var(--pass-bg)' : 'var(--warn-bg)'};border:1px solid ${result.phase1Pass ? 'var(--pass-b)' : 'var(--warn-b)'};border-radius:8px;padding:12px">
           <div style="font-size:12px;font-weight:600;color:${result.phase1Pass ? 'var(--pass-t)' : 'var(--warn-t)'};margin-bottom:4px">
@@ -742,8 +759,11 @@ async function runSynthesize() {
             ${result.phase2Updated ? '✅' : '⏭️'} Phase 2: Auto-Tune
           </div>
           <div style="font-size:11px;color:var(--text2)">
-            ${result.phase2Updated ? result.phase2Changes.length + ' selectors improved' : 'No tuning needed'}
+            ${result.phase2Updated
+              ? result.phase2Changes.length + ' selectors improved'
+              : (result.phase2SkipReason || 'No tuning needed')}
           </div>
+          ${result.healRoundsUsed > 0 ? `<div style="font-size:10px;color:var(--text2);margin-top:4px">🔁 ${result.healRoundsUsed} heal round(s) attempted</div>` : ''}
         </div>
         <div style="background:${result.phase3Pass ? 'var(--pass-bg)' : 'var(--warn-bg)'};border:1px solid ${result.phase3Pass ? 'var(--pass-b)' : 'var(--warn-b)'};border-radius:8px;padding:12px">
           <div style="font-size:12px;font-weight:600;color:${result.phase3Pass ? 'var(--pass-t)' : 'var(--warn-t)'};margin-bottom:4px">
