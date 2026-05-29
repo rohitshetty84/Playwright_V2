@@ -45,11 +45,11 @@ jobs:
       - name: Export golden tests to .spec.ts files
         run: |
           if [ -n "${{ inputs.golden_ids }}" ]; then
-            python ci/export_goldens.py --from golden --to tests --ids "${{ inputs.golden_ids }}"
+            python3 ci/export_goldens.py --from playwright-ai-studio/golden --to tests --ids "${{ inputs.golden_ids }}"
           elif [ -n "${{ inputs.golden_id }}" ]; then
-            python ci/export_goldens.py --from golden --to tests --ids "${{ inputs.golden_id }}"
+            python3 ci/export_goldens.py --from playwright-ai-studio/golden --to tests --ids "${{ inputs.golden_id }}"
           else
-            python ci/export_goldens.py --from golden --to tests
+            python3 ci/export_goldens.py --from playwright-ai-studio/golden --to tests
           fi
 
       - name: Install npm dependencies
