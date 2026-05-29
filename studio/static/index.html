@@ -542,6 +542,13 @@
             <div style="font-size:12px;color:var(--text3);margin-top:8px;">Enter one or more golden IDs separated by commas. This dispatches the configured GitHub workflow with <code>golden_ids</code>.</div>
           </div>
         </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div style="font-size:12px;color:var(--text2)">Golden files must be pushed to GitHub before CI can find them.</div>
+          <button class="btn btn-ghost btn-sm" id="sync-github-btn" onclick="syncGoldensToGitHub()" style="gap:6px">
+            ⬆️ Sync to GitHub
+          </button>
+        </div>
+        <div id="sync-status" style="display:none;font-size:12px;padding:8px 12px;border-radius:6px;margin-bottom:10px"></div>
         <div id="golden-list"></div>
       </div>
 
@@ -982,69 +989,33 @@ async function healAndValidateLoop(gid) {
   setProgress('heal-prog-bar', null, 10 + (attempt - 1) * 20);
 
   try {
-    healLog('🔧 Generating healed code…');
+    healLog('🔧 Generating & validating healed code (vision-assisted)…');
     setProgress('heal-prog-bar', null, 35);
 
-    const result = await api('POST', '/heal/' + gid);
+    // Single call: heal + local validation in one round-trip
+    const result = await api('POST', '/heal-and-validate/' + gid);
     STATE.healCode = result.healedCode;
 
-    healLog('✓ Healed code generated — analyzing changes…');
-
-    // Changes list
-    const changesEl = document.getElementById('heal-changes');
-    changesEl.innerHTML = (result.changes||[]).map(c=>`<div class="analysis-item" style="color:var(--pass-t)">✓ ${esc(c)}</div>`).join('');
-
     document.getElementById('heal-code-pre').innerHTML = highlight(result.healedCode);
-
-    setProgress('heal-prog-bar', null, 75);
-    healLog('🧪 Running validation locally…');
-
-    // AUTOMATICALLY validate (no manual click needed)
-    await validateFixAuto(gid);
-
-  } catch(e) {
-    healLog('⚠ Healing error: ' + e.message, 'log-err');
-    document.getElementById('heal-form').style.display = '';
-  }
-}
-
-async function validateFixAuto(gid) {
-  // Automatic validation during healing loop
-  const attempt = STATE.healAttempt;
-  const maxAttempts = STATE.maxHealAttempts;
-
-  try {
-    setProgress('heal-prog-bar', null, 85);
-
-    const result = await api('POST', '/heal-and-validate/' + gid);
-
     setProgress('heal-prog-bar', null, 100);
 
     if (result.testResult === 'PASS') {
       healLog(`✅ VALIDATION PASSED in ${result.duration.toFixed(1)}s!`, 'log-ok');
       healLog(`✓ Auto-heal succeeded on attempt ${attempt}/${maxAttempts}. Ready to promote.`, 'log-ok');
-
-      // Show promote button only on success
       document.getElementById('validate-btn').style.display = 'none';
       document.getElementById('promote-btn').style.display = '';
       document.getElementById('heal-result').style.display = '';
-      return;
     } else {
-      // Test failed
       const errorMsg = result.error || 'Unknown error';
       healLog(`❌ Validation failed: ${errorMsg}`, 'log-err');
 
       if (attempt < maxAttempts) {
-        // Auto-retry with learning
         healLog(`🔄 Learning from failure — attempting heal #${attempt + 1}…`, 'log-wait');
-        await new Promise(resolve => setTimeout(resolve, 1500));  // Brief pause between attempts
+        await new Promise(resolve => setTimeout(resolve, 1500));
         await healAndValidateLoop(gid);
       } else {
-        // Max attempts reached - escalate to manual
         healLog(`⚠️  Reached max auto-heal attempts (${maxAttempts}). Manual review needed.`, 'log-warn');
         healLog(`Last error: ${errorMsg}`, 'log-err');
-
-        // Show manual intervention buttons
         document.getElementById('validate-btn').style.display = '';
         document.getElementById('validate-btn').textContent = '🔄 Validate Again';
         document.getElementById('promote-btn').style.display = '';
@@ -1053,7 +1024,8 @@ async function validateFixAuto(gid) {
       }
     }
   } catch(e) {
-    healLog('⚠ Validation error: ' + e.message, 'log-err');
+    healLog('⚠ Healing error: ' + e.message, 'log-err');
+    document.getElementById('heal-form').style.display = '';
   }
 }
 
@@ -1287,6 +1259,29 @@ async function dispatchSelectedGoldens() {
   } catch (e) {
     toast('✗ Failed to dispatch workflow: ' + e.message);
     console.error('CI dispatch error:', e);
+  }
+}
+
+async function syncGoldensToGitHub() {
+  const btn = document.getElementById('sync-github-btn');
+  const statusEl = document.getElementById('sync-status');
+  btn.disabled = true;
+  btn.textContent = '⏳ Syncing…';
+  statusEl.style.display = 'none';
+
+  try {
+    const res = await api('POST', '/api/goldens/sync');
+    const ok = res.synced;
+    statusEl.style.cssText = `display:block;background:${ok ? 'var(--pass-bg)' : 'var(--bg)'};border:1px solid ${ok ? 'var(--pass-b)' : 'var(--border)'};color:${ok ? 'var(--pass-t)' : 'var(--text2)'};font-size:12px;padding:8px 12px;border-radius:6px;margin-bottom:10px`;
+    statusEl.textContent = ok ? '✅ ' + res.message : 'ℹ️ ' + res.message;
+    toast(ok ? '✓ Goldens pushed to GitHub' : 'ℹ️ ' + res.message);
+  } catch (e) {
+    statusEl.style.cssText = 'display:block;background:var(--warn-bg);border:1px solid var(--warn-b);color:var(--warn-t);font-size:12px;padding:8px 12px;border-radius:6px;margin-bottom:10px';
+    statusEl.textContent = '✗ Sync failed: ' + e.message;
+    toast('✗ Sync failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⬆️ Sync to GitHub';
   }
 }
 

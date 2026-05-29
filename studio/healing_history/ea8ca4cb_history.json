@@ -1,0 +1,14 @@
+[
+  {
+    "fix": "Applied targeted fix for root cause: selector_timeout",
+    "rootCause": "selector_timeout",
+    "confidence": 0.8,
+    "error": "Selector timeout on dynamic elements.",
+    "succeeded": false,
+    "testResult": "FAIL",
+    "duration": 50.42,
+    "newError": "page.waitForLoadState: Timeout 45000ms exceeded.\\n=========================== logs ===========================\\n  \\\"domcontentloaded\\\" event fired\\n  \\\"load\\\" event fired\\n============================================================\",",
+    "attemptNumber": 1,
+    "timestamp": "2026-05-29 18:49"
+  }
+]

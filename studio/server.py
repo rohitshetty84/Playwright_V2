@@ -57,19 +57,25 @@ console_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
-# ── Ensure Playwright browsers are installed for this Python venv ──────────────
+# ── Ensure Playwright browsers are installed — only when binary is missing ─────
 try:
-    _pw_check = subprocess.run(
-        ["python", "-m", "playwright", "install", "chromium"],
-        capture_output=True, text=True, timeout=120,
-        cwd=str(BASE)
-    )
-    if _pw_check.returncode != 0:
-        logger.warning(f"playwright install chromium warning: {_pw_check.stderr[:200]}")
+    from playwright.sync_api import sync_playwright as _spw
+    with _spw() as _p:
+        _exe = _p.chromium.executable_path
+    if not Path(_exe).exists():
+        logger.info("Playwright chromium not found — running install...")
+        _pw_check = subprocess.run(
+            ["python", "-m", "playwright", "install", "chromium"],
+            capture_output=True, text=True, timeout=120, cwd=str(BASE)
+        )
+        if _pw_check.returncode != 0:
+            logger.warning(f"playwright install warning: {_pw_check.stderr[:200]}")
+        else:
+            logger.info("Playwright chromium installed")
     else:
-        logger.info("Playwright chromium browser ready")
+        logger.info(f"Playwright chromium ready at {_exe}")
 except Exception as _pw_err:
-    logger.warning(f"Could not verify Playwright browser install: {_pw_err}")
+    logger.warning(f"Could not verify Playwright browser: {_pw_err}")
 
 def _strip_ansi(text):
     if isinstance(text, str):
@@ -120,7 +126,11 @@ RUNS_DIR.mkdir(exist_ok=True)
 HEALING_DIR.mkdir(exist_ok=True)
 
 # ── Synthesis tuning ─────────────────────────────────────────────────────────
-MAX_HEAL_ROUNDS = 3  # Max Phase-1/2 retry cycles before giving up
+MAX_HEAL_ROUNDS   = 3    # Max Phase-1/2 retry cycles before giving up
+LLM_TEMPERATURE   = 0.2  # All LLM calls use a single determinism constant
+LLM_MAX_TOKENS    = 1500 # Default output token budget
+LLM_VISION_TOKENS = 2000 # Vision responses include full TS code — need more room
+NAV_PAUSE_MS      = 2000 # Post-navigation pause so JS-rendered elements appear
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Playwright AI Studio", version="1.0.0")
@@ -156,7 +166,7 @@ class TriggerCIRequest(BaseModel):
 class ValidateHealRequest(BaseModel):
     golden_id: str
 # ── Azure OpenAI helper ───────────────────────────────────────────────────────
-def ask_llm(system: str, user: str, max_tokens: int = 1500) -> str:
+def ask_llm(system: str, user: str, max_tokens: int = LLM_MAX_TOKENS) -> str:
     try:
         resp = client.chat.completions.create(
             model=DEPLOYMENT,
@@ -165,7 +175,7 @@ def ask_llm(system: str, user: str, max_tokens: int = 1500) -> str:
                 {"role": "user",   "content": user},
             ],
             max_tokens=max_tokens,
-            temperature=0.2,
+            temperature=LLM_TEMPERATURE,
         )
         return resp.choices[0].message.content or ""
     except Exception as e:
@@ -214,7 +224,7 @@ def save_healing_attempt(golden_id: str, attempt: dict):
     attempt["timestamp"] = ts_now()
     history.append(attempt)
     save_json(HEALING_DIR, f"{golden_id}_history", history)
-    print(f"[healing] Recorded attempt #{attempt['attemptNumber']} for golden {golden_id}")
+    logger.info(f"[healing] Recorded attempt #{attempt['attemptNumber']} for golden {golden_id}")
 
 def get_healing_failures_for_error(golden_id: str, error_msg: str) -> list:
     """Get all failed healing attempts for a specific error"""
@@ -281,7 +291,7 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
 
         try:
             # Call the Node.js validation script
-            root_project = BASE.parent  # Go up from playwright-ai-studio
+            root_project = BASE.parent  # Go up from studio/
             validate_script = root_project / "validate-test.js"
 
             if not validate_script.exists():
@@ -302,9 +312,9 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
                     "passed": False
                 }
 
-            print(f"[validation] Temp file created: {temp_file}")
-            print(f"[validation] File size: {temp_file_path.stat().st_size} bytes")
-            print(f"[validation] Running: node {validate_script} {temp_file}")
+            logger.debug(f"[validation] Temp file created: {temp_file}")
+            logger.debug(f"[validation] File size: {temp_file_path.stat().st_size} bytes")
+            logger.debug(f"[validation] Running: node {validate_script} {temp_file}")
 
             result = subprocess.run(
                 ['node', str(validate_script), temp_file],
@@ -314,10 +324,10 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
                 cwd=str(root_project)
             )
 
-            print(f"[validation] Exit code: {result.returncode}")
-            print(f"[validation] Stdout: {result.stdout[:500]}")
+            logger.debug(f"[validation] Exit code: {result.returncode}")
+            logger.debug(f"[validation] Stdout: {result.stdout[:500]}")
             if result.stderr:
-                print(f"[validation] Stderr: {result.stderr[:500]}")
+                logger.debug(f"[validation] Stderr: {result.stderr[:500]}")
 
             # Parse JSON result — stdout contains [validate] log lines before the JSON
             try:
@@ -339,7 +349,7 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
             try:
                 Path(temp_file).unlink()
             except Exception as cleanup_err:
-                print(f"[validation] Warning: Could not delete temp file {temp_file}: {cleanup_err}")
+                logger.warning(f"[validation] Warning: Could not delete temp file {temp_file}: {cleanup_err}")
 
     except subprocess.TimeoutExpired:
         return {
@@ -356,6 +366,25 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
             "passed": False
         }
 
+def _clean_healed_code(code: str) -> str:
+    """Strip markdown fences and trailing LLM commentary from healed TypeScript."""
+    code = re.sub(r"```(?:typescript|ts|js)?[\n]?", "", code).strip()
+    code = re.sub(r"```$", "", code).strip()
+    # Keep only up to the last closing }); so trailing summary text is dropped
+    lines = code.split('\n')
+    for i in range(len(lines) - 1, -1, -1):
+        if '});' in lines[i]:
+            code = '\n'.join(lines[:i+1]).rstrip()
+            break
+    # Drop any trailing [AI-HEAL] comment lines the LLM appended after the block
+    while True:
+        lines = code.split('\n')
+        if lines and re.match(r'^\s*(\*+\s*)?\[AI-HEAL\]', lines[-1]):
+            code = '\n'.join(lines[:-1]).rstrip()
+        else:
+            break
+    return code
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -370,61 +399,6 @@ async def get_goldens():
 async def get_runs():
     return load_runs()
 
-# ─ Step 1: Analyse test case ──────────────────────────────────────────────────
-@app.post("/api/synthesize/analyse")
-async def analyse(req: SynthesizeRequest):
-    raw = ask_llm(
-        system="""You are a Playwright test architect specialising in SAP SuccessFactors automation.
-Analyse the test case description and any script fragment provided.
-Return ONLY a JSON object (no markdown) with these keys:
-  "steps"             – array of step name strings
-  "selectors"         – array of key selector descriptions
-  "risks"             – array of flakiness risk strings
-  "healingStrategies" – array of recommended healing patterns""",
-        user=f"Test case: {req.test_case}\n\nExisting script:\n{req.script_fragment or '(none)'}",
-        max_tokens=600,
-    )
-    # Strip markdown fences if model adds them
-    clean = re.sub(r"```(?:json)?|```", "", raw).strip()
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError:
-        return {
-            "steps": ["Login", "Navigate to Onboarding", "Search candidate", "Update fields", "Submit"],
-            "selectors": ["role-based locators", "getByRole", "getByText"],
-            "risks": ["dynamic content loading", "timing", "multiple matching elements"],
-            "healingStrategies": [".first() scoping", ".or() fallback chains", "waitForLoadState"],
-        }
-
-# ─ Step 2: Synthesize full script ─────────────────────────────────────────────
-@app.post("/api/synthesize/generate")
-async def generate(req: SynthesizeRequest):
-    analysis_raw = ask_llm(
-        system="Return ONLY JSON. No markdown.",
-        user=f"Analyse: {req.test_case}",
-        max_tokens=400,
-    )
-
-    code = ask_llm(
-        system="""You are a senior Playwright TypeScript engineer for SAP SuccessFactors automation.
-Generate a complete, production-ready Playwright test file.
-
-Rules:
-- Use TypeScript with proper imports from '@playwright/test'
-- Include a login() helper using storageState from user.json
-- Use getByRole() selectors; apply .first() when multiple matches are possible
-- Apply .or() fallback chains for dynamic elements (e.g. Nudge button)
-- Add waitForLoadState('networkidle') after navigation
-- Log each TC step with console.log('[step] ✅ description')
-- Use a for..of loop over CANDIDATES from './test-data'
-- Mark path='A' vs path='B' branching clearly
-- Add [AI-SYNTHESIZED] inline comments explaining selector choices
-Output ONLY the TypeScript code. No markdown fences.""",
-        user=f"Test case: {req.test_case}\n\nScript hints:\n{req.script_fragment or '(none)'}",
-        max_tokens=1500,
-    )
-    return {"code": code}
-
 # ─ Shared: capture a screenshot from a URL for LLM context ───────────────────
 async def capture_screenshot_b64(url: str, label: str = "") -> Optional[str]:
     """Navigate to url, return base64 PNG or None on failure."""
@@ -438,7 +412,7 @@ async def capture_screenshot_b64(url: str, label: str = "") -> Optional[str]:
                 break
             except Exception:
                 pass
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(NAV_PAUSE_MS)
         shot = await page.screenshot(full_page=False)
         await browser.close()
         await pb.stop()
@@ -477,7 +451,7 @@ async def analyze_page_with_vision(url: str, test_description: str) -> str:
             except Exception as _e:
                 logger.warning(f"[VISION] ⚠️  '{_w}' timed out — trying next ({_e})")
 
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(NAV_PAUSE_MS)
         # Capture screenshot
         screenshot_bytes = await page.screenshot()
         screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
@@ -541,8 +515,8 @@ test.describe('Page Test', () => {{
                     ]
                 }
             ],
-            max_tokens=2000,
-            temperature=0.2
+            max_tokens=LLM_VISION_TOKENS,
+            temperature=LLM_TEMPERATURE
         )
 
         generated_code = response.choices[0].message.content.strip()
@@ -635,7 +609,7 @@ async def synthesize_with_validation(req: SynthesizeRequest):
                 raise RuntimeError(f"Could not load {url} with any wait strategy")
 
             # Brief pause so JS-rendered elements appear in the screenshot
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(NAV_PAUSE_MS)
             screenshot_bytes = await page.screenshot()
             screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
             logger.info(f"[PHASE 0A] ✅ Screenshot captured")
@@ -862,8 +836,7 @@ Output ONLY the corrected TypeScript code. No markdown fences."""
                 )
 
                 new_code = heal_response.choices[0].message.content.strip()
-                new_code = re.sub(r"```(?:typescript|ts|js)?[\n]?", "", new_code).strip()
-                new_code = re.sub(r"```$", "", new_code).strip()
+                new_code = _clean_healed_code(new_code)
 
                 if new_code and new_code != current_code:
                     logger.info(
@@ -1101,6 +1074,51 @@ Return ONLY JSON: {"suggestions": [{"old": "selector", "new": "better selector",
 
 
 # ─ Save as Golden ──────────────────────────────────────────────────────────────
+def git_sync_goldens(message: str) -> dict:
+    """
+    Stage all golden JSON files, commit, and push to origin.
+    Returns {"pushed": bool, "output": str, "error": str|None}.
+    """
+    repo_root = BASE.parent
+    try:
+        # Stage only the golden directory so we never accidentally commit secrets
+        stage = subprocess.run(
+            ["git", "add", "studio/golden/"],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=15
+        )
+        if stage.returncode != 0:
+            return {"pushed": False, "output": "", "error": stage.stderr.strip()}
+
+        # Check if there is anything new to commit
+        diff = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(repo_root), capture_output=True, timeout=10
+        )
+        if diff.returncode == 0:
+            return {"pushed": False, "output": "Nothing to commit — golden already up to date", "error": None}
+
+        commit = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=15
+        )
+        if commit.returncode != 0:
+            return {"pushed": False, "output": commit.stdout, "error": commit.stderr.strip()}
+
+        push = subprocess.run(
+            ["git", "push"],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=30
+        )
+        if push.returncode != 0:
+            return {"pushed": False, "output": push.stdout, "error": push.stderr.strip()}
+
+        logger.info(f"[git-sync] ✅ Pushed: {message}")
+        return {"pushed": True, "output": push.stdout.strip() or "Pushed successfully", "error": None}
+
+    except Exception as e:
+        logger.warning(f"[git-sync] ⚠️  {e}")
+        return {"pushed": False, "output": "", "error": str(e)}
+
+
 @app.post("/api/goldens")
 async def create_golden(req: SaveGoldenRequest):
     gid = str(uuid.uuid4())[:8]
@@ -1118,7 +1136,24 @@ async def create_golden(req: SaveGoldenRequest):
         "steps": len(req.analysis.get("steps", [])) or 5,
     }
     save_json(GOLDEN_DIR, gid, golden)
-    return golden
+
+    # Auto-push so GitHub Actions can find the golden immediately
+    sync = git_sync_goldens(f"Add golden: {req.name} [{gid}]")
+    if sync["pushed"]:
+        logger.info(f"[create_golden] ✅ Golden {gid} pushed to GitHub")
+    else:
+        logger.warning(f"[create_golden] ⚠️  Git sync skipped: {sync.get('error') or sync.get('output')}")
+
+    return {**golden, "gitSynced": sync["pushed"], "gitMessage": sync.get("output") or sync.get("error")}
+
+
+@app.post("/api/goldens/sync")
+async def sync_goldens_to_github():
+    """Commit and push all golden JSON files — use when auto-push was skipped."""
+    sync = git_sync_goldens("Sync goldens to GitHub")
+    if not sync["pushed"] and sync["error"]:
+        raise HTTPException(status_code=500, detail=sync["error"])
+    return {"synced": sync["pushed"], "message": sync.get("output") or "Nothing new to push"}
 
 # ─ Record a test run ──────────────────────────────────────────────────────────
 @app.post("/api/runs")
@@ -1163,7 +1198,7 @@ async def record_run(req: RunRequest):
                         "result": "Same error persists after healing",
                         "testResult": "FAIL"
                     })
-                    print(f"[healing] ❌ HEALING FAILED for {req.golden_id}: Same error persists")
+                    logger.warning(f"[healing] ❌ HEALING FAILED for {req.golden_id}: Same error persists")
                 else:
                     # Different error - healing helped with previous issue
                     save_healing_attempt(req.golden_id, {
@@ -1173,7 +1208,7 @@ async def record_run(req: RunRequest):
                         "result": f"New error appeared: {error_msg}",
                         "testResult": "FAIL"
                     })
-                    print(f"[healing] ⚠️  New error for {req.golden_id}: {error_msg}")
+                    logger.warning(f"[healing] ⚠️  New error for {req.golden_id}: {error_msg}")
         else:
             # All tests passed! Healing succeeded!
             if history:
@@ -1184,11 +1219,11 @@ async def record_run(req: RunRequest):
                     "result": "All tests passed!",
                     "testResult": "PASS"
                 })
-                print(f"[healing] ✅ HEALING SUCCEEDED for {req.golden_id}!")
+                logger.info(f"[healing] ✅ HEALING SUCCEEDED for {req.golden_id}!")
 
     # Log for debugging
     status = "✓ recorded" if golden else "⚠ recorded (golden not found, using ID as name)"
-    print(f"[api/runs] {status} — ID={rid}, golden={req.golden_id}, candidates={len(req.candidates)}")
+    logger.info(f"[api/runs] {status} — ID={rid}, golden={req.golden_id}, candidates={len(req.candidates)}")
 
     return run
 
@@ -1271,8 +1306,8 @@ Output ONLY the TypeScript code. No markdown."""
                     {"type": "text", "text": f"{system_prompt}\n\nErrors:\n{error_summary}\n\nOriginal golden script:\n{golden['code']}{learning_context}"}
                 ]
             }],
-            max_tokens=1500,
-            temperature=0.2
+            max_tokens=LLM_MAX_TOKENS,
+            temperature=LLM_TEMPERATURE
         )
         healed_code = heal_response.choices[0].message.content.strip()
         logger.info(f"[heal] ✅ Vision-assisted heal response received ({len(healed_code)} chars)")
@@ -1284,42 +1319,8 @@ Output ONLY the TypeScript code. No markdown."""
             max_tokens=1500,
         )
 
-    # Strip markdown fences if LLM wrapped code in them
-    healed_code = re.sub(r"```(?:typescript|ts|js)?[\n]?", "", healed_code).strip()
-
-    # CRITICAL FIX: Remove trailing [AI-HEAL] comments and junk after closing braces
-    # Azure OpenAI sometimes appends comments/summaries after code ends, breaking syntax
-    # Strategy: Remove everything after the last complete test block
-
-    # First, find and keep only up to the last closing });
-    lines = healed_code.split('\n')
-    kept_lines = []
-    found_closing = False
-
-    for i in range(len(lines) - 1, -1, -1):
-        line = lines[i]
-        # Look for the closing pattern of a test describe block: });
-        if not found_closing and '});' in line:
-            # Keep this line and everything before it
-            kept_lines = lines[:i+1]
-            found_closing = True
-            break
-
-    # If we found a proper closing, use it; otherwise use original
-    if found_closing:
-        healed_code = '\n'.join(kept_lines).rstrip()
-
-    # Additional safeguard: Remove any trailing lines that are [AI-HEAL] comments
-    while True:
-        lines = healed_code.split('\n')
-        last_line = lines[-1] if lines else ''
-        if re.match(r'^\s*(\*+\s*)?\[AI-HEAL\]', last_line):
-            lines.pop()
-            healed_code = '\n'.join(lines).rstrip()
-        else:
-            break
-
-    print(f"[heal] Generated fix for golden {golden_id} (attempt #{len(healing_history) + 1})")
+    healed_code = _clean_healed_code(healed_code)
+    logger.info(f"[heal] Generated fix for golden {golden_id} (attempt #{len(healing_history) + 1})")
 
     # Generate a plain-English diff summary
     diff_summary = ask_llm(
@@ -1380,13 +1381,13 @@ async def heal_and_validate(golden_id: str):
         root_cause = diagnosis.get("root_cause", "UNKNOWN")
         confidence = diagnosis.get("confidence", 0.0)
 
-        print(f"[heal-validate] Root cause diagnosis: {root_cause} (confidence: {confidence:.0%})")
-        print(f"[heal-validate] Evidence: {diagnosis.get('evidence', 'No evidence')}")
+        logger.info(f"[heal-validate] Root cause diagnosis: {root_cause} (confidence: {confidence:.0%})")
+        logger.debug(f"[heal-validate] Evidence: {diagnosis.get('evidence', 'No evidence')}")
 
         # ── Analyze healing history for patterns ──────────────────────────────
         history_analysis = analyze_healing_history(healing_history)
         if history_analysis.get("needs_manual_review"):
-            print(f"[heal-validate] ⚠️ Healing stuck - manual review recommended")
+            logger.warning(f"[heal-validate] ⚠️ Healing stuck - manual review recommended")
 
         # Build learning context from history
         if len(healing_history) > 0:
@@ -1442,45 +1443,11 @@ Strategy: Apply targeted fix for '{root_cause}' instead of generic selector fixe
                 max_tokens=1500,
             )
 
-        # Strip markdown fences if LLM wrapped code in them
-        healed_code = re.sub(r"```(?:typescript|ts|js)?[\n]?", "", healed_code).strip()
-
-        # CRITICAL FIX: Remove trailing [AI-HEAL] comments and junk after closing braces
-        # Azure OpenAI sometimes appends comments/summaries after code ends, breaking syntax
-        # Strategy: Remove everything after the last complete test block
-
-        # First, find and keep only up to the last closing });
-        lines = healed_code.split('\n')
-        kept_lines = []
-        found_closing = False
-
-        for i in range(len(lines) - 1, -1, -1):
-            line = lines[i]
-            # Look for the closing pattern of a test describe block: });
-            if not found_closing and '});' in line:
-                # Keep this line and everything before it
-                kept_lines = lines[:i+1]
-                found_closing = True
-                break
-
-        # If we found a proper closing, use it; otherwise use original
-        if found_closing:
-            healed_code = '\n'.join(kept_lines).rstrip()
-
-        # Additional safeguard: Remove any trailing lines that are [AI-HEAL] comments
-        while True:
-            lines = healed_code.split('\n')
-            last_line = lines[-1] if lines else ''
-            if re.match(r'^\s*(\*+\s*)?\[AI-HEAL\]', last_line):
-                lines.pop()
-                healed_code = '\n'.join(lines).rstrip()
-            else:
-                break
-
-        print(f"[heal-validate] Generated targeted fix for '{root_cause}' (attempt #{len(healing_history) + 1})")
+        healed_code = _clean_healed_code(healed_code)
+        logger.info(f"[heal-validate] Generated targeted fix for '{root_cause}' (attempt #{len(healing_history) + 1})")
 
         # Step 2: Run test locally
-        print(f"[heal-validate] Running test locally for golden {golden_id}...")
+        logger.info(f"[heal-validate] Running test locally for golden {golden_id}...")
         validation_result = await validate_test_locally(healed_code, golden_id)
 
         # Step 3: Return result with code + pass/fail
@@ -1508,11 +1475,11 @@ Strategy: Apply targeted fix for '{root_cause}' instead of generic selector fixe
 
         if validation_result["status"] == "PASS":
             response["message"] = f"✅ Test PASSED in {validation_result.get('duration', 0):.1f}s! Ready to promote."
-            print(f"[heal-validate] ✅ LOCAL TEST PASSED for {golden_id}!")
+            logger.info(f"[heal-validate] ✅ LOCAL TEST PASSED for {golden_id}!")
         else:
             error_msg = validation_result.get("error", "Unknown error")
             response["message"] = f"❌ Test FAILED: {error_msg}"
-            print(f"[heal-validate] ❌ LOCAL TEST FAILED for {golden_id}: {error_msg}")
+            logger.warning(f"[heal-validate] ❌ LOCAL TEST FAILED for {golden_id}: {error_msg}")
             response["diagnosis"] = {
                 "rootCause": root_cause,
                 "confidence": confidence,
@@ -1522,7 +1489,7 @@ Strategy: Apply targeted fix for '{root_cause}' instead of generic selector fixe
         return response
 
     except Exception as e:
-        print(f"[heal-validate] Error: {str(e)}")
+        logger.error(f"[heal-validate] Error: {str(e)}")
         return {
             "error": str(e),
             "goldenId": golden_id,
@@ -1555,21 +1522,21 @@ async def promote_healed(golden_id: str, body: PromoteGoldenRequest):
         "result": "Promoted and awaiting test results",
         "testResult": "PENDING"
     })
-    print(f"[promote] Saved healing attempt #{golden.get('healCount')} for {golden_id}")
+    logger.info(f"[promote] Saved healing attempt #{golden.get('healCount')} for {golden_id}")
 
     # ── Auto-trigger GitHub Actions to test the healed golden ──────────────────
     # This ensures the healed code is tested with the updated golden file
     workflow_result = {"status": "skipped", "message": "GitHub workflow not configured"}
     try:
-        print(f"[promote] Auto-triggering workflow for healed golden: {golden_id}")
+        logger.info(f"[promote] Auto-triggering workflow for healed golden: {golden_id}")
         workflow_result = dispatch_github_workflow({"golden_ids": golden_id})
-        print(f"[promote] Workflow triggered successfully: {workflow_result.get('message')}")
+        logger.info(f"[promote] Workflow triggered successfully: {workflow_result.get('message')}")
     except HTTPException as e:
         # Workflow dispatch failed but golden was saved successfully
-        print(f"[promote] Warning: Could not trigger workflow: {e.detail}")
+        logger.warning(f"[promote] Warning: Could not trigger workflow: {e.detail}")
         workflow_result = {"status": "failed", "message": str(e.detail)}
     except Exception as e:
-        print(f"[promote] Unexpected error triggering workflow: {e}")
+        logger.error(f"[promote] Unexpected error triggering workflow: {e}")
         workflow_result = {"status": "failed", "message": str(e)}
 
     return {

@@ -1,0 +1,11 @@
+[
+  {
+    "fix": "Generated fix from Azure OpenAI",
+    "error": "TBD - will be confirmed when tests run",
+    "succeeded": null,
+    "result": "Promoted and awaiting test results",
+    "testResult": "PENDING",
+    "attemptNumber": 1,
+    "timestamp": "2026-05-29 18:48"
+  }
+]

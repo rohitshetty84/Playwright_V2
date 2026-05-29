@@ -38,11 +38,11 @@ blob-report/
 .cache/
 
 # ── Studio runtime data ───────────────────────────────────────────────────────
-# Uncomment the next two lines if you DO NOT want to commit goldens / run history.
-# Most teams DO commit goldens (they're the source of truth for tests) and
-# leave runs/ out of git.
-# golden/
+# goldens/ is committed (source of truth for tests).
+# Logs, runs, and test-results are runtime artifacts — never commit them.
 runs/
+studio/runs/
+studio/logs/
 
 # ── Editors / OS ──────────────────────────────────────────────────────────────
 .vscode/
@@ -50,7 +50,10 @@ runs/
 *.swp
 *.swo
 .DS_Store
+.DS_Store?
 Thumbs.db
+__pycache__/
+*.pyc
 
 # ── Build artifacts ───────────────────────────────────────────────────────────
 dist/

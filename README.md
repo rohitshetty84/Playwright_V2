@@ -23,7 +23,7 @@ Backed by **Azure OpenAI** (GPT-4o) · Python **FastAPI** · single-file HTML fr
 
 ```bash
 # 1. Clone / copy this folder into your project
-cd playwright-ai-studio
+cd studio
 
 # 2. Create a virtual environment
 python -m venv .venv
@@ -33,7 +33,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 # 4. Configure Azure OpenAI
-cp .env.example .env
+cp ../.env.example .env
 # Edit .env — fill in your endpoint, key, and deployment name
 
 # 5. Start the server
@@ -49,7 +49,7 @@ To exercise the goldens locally exactly the way CI will:
 ```bash
 npm install
 npx playwright install --with-deps msedge
-python ci/export_goldens.py --from golden --to tests
+python ci/export_goldens.py --from studio/golden --to tests
 npx playwright test
 ```
 
@@ -61,7 +61,7 @@ The workflow definition lives in `.github/workflows/playwright.yml`. It has thre
 
 | Job | What it does |
 |-----|--------------|
-| `prepare-goldens` | Reads `playwright-ai-studio/golden/*.json` and writes each `code` field out as `tests/<name>.spec.ts`. Uploads `tests/` as an artifact. |
+| `prepare-goldens` | Reads `studio/golden/*.json` and writes each `code` field out as `tests/<name>.spec.ts`. Uploads `tests/` as an artifact. |
 | `playwright-test` | `npm ci` + `npx playwright install --with-deps msedge` + `npx playwright test`. Emits HTML report, JUnit, and `results.json` as artifacts. |
 | `report-runs` | POSTs the run summary back to a deployed Studio at `$PLAYWRIGHT_AI_STUDIO_URL/api/runs`. Skipped automatically if that **variable** is unset. |
 
@@ -178,12 +178,16 @@ AI reads the failure errors, generates a healed script with `[AI-HEAL]` inline c
 |--------|------|-------------|
 | GET | `/api/goldens` | List all golden files |
 | POST | `/api/goldens` | Save a new golden |
+| POST | `/api/goldens/sync` | Commit and push all goldens to GitHub |
 | PATCH | `/api/goldens/{id}/promote` | Promote healed code as golden |
 | GET | `/api/runs` | List all test runs |
 | POST | `/api/runs` | Record a new test run |
-| POST | `/api/synthesize/analyse` | Analyse test case (returns JSON) |
-| POST | `/api/synthesize/generate` | Generate TypeScript script |
-| POST | `/api/heal/{golden_id}` | Run auto-heal for a golden |
+| POST | `/api/synthesize/with-validation` | Synthesize → run locally → vision-heal loop → ready for golden |
+| POST | `/api/heal/{golden_id}` | Vision-assisted auto-heal (returns healed code + change summary) |
+| POST | `/api/heal-and-validate/{golden_id}` | Heal + run locally — returns pass/fail instantly |
+| POST | `/api/trigger-ci/{golden_id}` | Dispatch GitHub Actions workflow for a golden |
+| GET | `/api/workflow-status/{golden_id}` | Poll status of the latest CI run |
+| GET | `/api/health` | Basic health check |
 
 ---
 
@@ -210,23 +214,30 @@ requests.post("http://localhost:8000/api/runs", json={
 ## File structure
 
 ```
-playwright-ai-studio/
-├── server.py            # FastAPI backend
-├── requirements.txt     # Python deps (FastAPI, OpenAI, etc.)
-├── package.json         # Node deps (Playwright)
-├── playwright.config.ts # Playwright config — CI-friendly defaults
-├── .env.example         # Local-dev template (CI uses GitHub secrets/variables)
-├── .github/
-│   └── workflows/
-│       └── playwright.yml   # GitHub Actions: prepare → test → report
+.                                   ← repo root
+├── .github/workflows/
+│   └── playwright.yml              # GitHub Actions: export → test → report
 ├── ci/
-│   ├── export_goldens.py  # golden/*.json  →  tests/*.spec.ts
-│   └── report_run.py      # results.json   →  POST /api/runs
-├── static/
-│   └── index.html       # Full UI — no build step
-├── golden/              # Auto-created — stores golden JSON files
-├── runs/                # Auto-created — stores run result JSON files
-└── tests/               # Auto-generated in CI from golden/ (gitignored)
+│   ├── export_goldens.py           # golden/*.json  →  tests/*.spec.ts
+│   ├── report_run.py               # results.json   →  POST /api/runs
+│   └── requirements.txt            # CI only: requests
+├── studio/
+│   ├── server.py                   # FastAPI backend
+│   ├── requirements.txt            # Python deps (FastAPI, OpenAI, etc.)
+│   ├── healing_engine.py           # Error signature + targeted-heal logic
+│   ├── static/
+│   │   └── index.html              # Full UI — no build step
+│   ├── golden/                     # Source-of-truth golden JSON files (committed)
+│   ├── runs/                       # Auto-created — run result JSON files
+│   └── healing_history/            # Heal attempt audit trail
+├── package.json                    # Node deps (Playwright)
+├── package-lock.json
+├── playwright.config.ts            # Playwright config — CI-friendly defaults
+├── validate-test.js                # Local test runner for auto-heal
+├── .env.example                    # Local-dev template (CI uses GitHub secrets)
+├── README.md
+├── TEST_CASE_DESCRIPTIONS.md       # Sample prompts for the Synthesize tab
+└── tests/                          # Auto-generated in CI from golden/ (gitignored)
 ```
 
 ---

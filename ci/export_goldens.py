@@ -6,8 +6,8 @@ Playwright can't execute JSON, so before running tests in CI we dump that
 source out to `tests/<safe-name>.spec.ts`.
 
 Usage (from .github/workflows/playwright.yml):
-    python ci/export_goldens.py --from golden --to tests
-    python ci/export_goldens.py --from golden --to tests --ids "seed-g1,4217f745"
+    python ci/export_goldens.py --from studio/golden --to tests
+    python ci/export_goldens.py --from studio/golden --to tests --ids "seed-g1,4217f745"
 
 When --ids is omitted (or empty), every golden in --from is exported.
 When --ids is provided, only goldens whose `id` field OR filename stem
@@ -113,7 +113,7 @@ def export(src: Path, dst: Path, wanted_ids: set[str]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export golden JSON -> .ts specs")
-    parser.add_argument("--from", dest="src", default="golden", help="source directory of golden JSON files")
+    parser.add_argument("--from", dest="src", default="studio/golden", help="source directory of golden JSON files")
     parser.add_argument("--to", dest="dst", default="tests", help="destination directory for .spec.ts files")
     parser.add_argument(
         "--ids",
