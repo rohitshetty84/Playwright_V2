@@ -1,0 +1,15 @@
+{
+  "id": "a7d26bf4",
+  "name": "_smoke-test.spec.ts",
+  "description": "API smoke test \u2014 delete me",
+  "code": "import { test } from '@playwright/test';\ntest('smoke', async () => {});",
+  "browsers": [
+    "chromium"
+  ],
+  "analysis": {},
+  "createdAt": "2026-05-29 18:48",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}
