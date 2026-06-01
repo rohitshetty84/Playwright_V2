@@ -573,12 +573,13 @@ async def synthesize_with_validation(req: SynthesizeRequest):
         logger.info("[PHASE 0] Synthesizing test with vision analysis (GPT-4V)...")
         log_json_result(0, "IN_PROGRESS", "Synthesizing with vision", {})
 
+        url = None   # may be set by Phase 0 or the fallback; used by Phase 2 screenshots
+
         try:
-            # Extract URL from test description
+            # Extract URL from test description (full https:// URLs only)
             url_match = re.search(r'https?://[^\s]+', req.test_case)
             if not url_match:
                 raise ValueError("No URL found in test description")
-
             url = url_match.group(0)
             logger.info(f"[PHASE 0] Detected URL: {url}")
 
@@ -648,6 +649,16 @@ SELECTOR RULES (in order of preference):
 4. For text content: getByText('...', {{ exact: true }})
 5. Avoid getByRole('link') for navigation tabs — it breaks on sites that use role="menuitem".
 
+AUTHENTICATION RULES (must follow — security requirement):
+- NEVER hardcode usernames, passwords, or any credentials in the test code.
+- If the test requires a logged-in session, add this line before the test block:
+    test.use({{ storageState: 'studio/.auth/<appName>.json' }});
+  Replace <appName> with a short identifier for the app (e.g. 'myapp', 'successfactors').
+- The storageState file is created once by running: npx ts-node scripts/auth.ts
+- If the test instructions mention login but no storageState is available yet, add this comment inside the test:
+    // TODO: run `npx ts-node scripts/auth.ts` to create the session file, then remove this line.
+- For apps that always start logged-in (no login step needed), omit the storageState line entirely.
+
 Include proper waits and error handling.
 Output ONLY the code, no markdown or explanations."""
                             }
@@ -663,21 +674,89 @@ Output ONLY the code, no markdown or explanations."""
 
         except Exception as e:
             logger.error(f"[PHASE 0] ❌ Vision synthesis failed: {str(e)}")
-            log_json_result(0, "FAILED", f"Vision synthesis error: {str(e)}", {})
-            return {
-                "error": f"Phase 0 Vision Synthesis failed: {str(e)}",
-                "generatedCode": "",
-                "phase1Pass": False,
-                "phase1Message": f"Phase 0 failed: {str(e)}",
-                "phase2Updated": False,
-                "phase2Changes": [],
-                "phase2SkipReason": "Phase 0 failed — no code generated",
-                "tunedCode": "",
-                "phase3Pass": False,
-                "phase3Message": "Not run (Phase 0 failed)",
-                "readyForGolden": False,
-                "recommendation": f"Vision analysis error: {str(e)}"
-            }
+            log_json_result(0, "FAILED", f"Vision synthesis error: {str(e)} — attempting text-only fallback", {})
+
+            # ── Phase 0 Fallback: text-only synthesis (no screenshot) ─────────
+            # Phase 0 couldn't take a screenshot or call vision — ask the LLM to
+            # generate a best-effort test from the description alone, then let
+            # Phase 1+2 run and heal it as normal.
+            logger.info("[PHASE 0-FALLBACK] Attempting text-only synthesis...")
+            try:
+                # Step 1: infer the URL from the description so Phase 2 can take
+                # healing screenshots even though Phase 0 never navigated anywhere.
+                url_infer = client.chat.completions.create(
+                    model=DEPLOYMENT,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            "Extract the full URL (including https://) from this test description. "
+                            "If only a domain is mentioned (e.g. 'bbc.com/news'), prepend https://. "
+                            "Return ONLY the URL — nothing else.\n\n"
+                            f"{req.test_case}"
+                        )
+                    }],
+                    max_tokens=80,
+                    temperature=0,
+                )
+                inferred = url_infer.choices[0].message.content.strip()
+                if inferred.startswith("http"):
+                    url = inferred
+                    logger.info(f"[PHASE 0-FALLBACK] Inferred URL: {url}")
+                else:
+                    logger.warning("[PHASE 0-FALLBACK] Could not infer URL — Phase 2 will run without screenshots")
+
+                # Step 2: generate test code from text description alone
+                fallback_resp = client.chat.completions.create(
+                    model=DEPLOYMENT,
+                    messages=[{
+                        "role": "user",
+                        "content": f"""Generate a complete Playwright TypeScript test for the following description.
+
+TEST INSTRUCTIONS:
+{req.test_case}
+
+SELECTOR RULES (in order of preference):
+1. For navigation tabs/menu items: use page.locator('a[role="menuitem"]').filter({{hasText: "..."}})
+2. For buttons: getByRole('button', {{ name: '...' }})
+3. For links with href: page.locator('a[href*="keyword"]')
+4. For text content: getByText('...', {{ exact: true }})
+5. Avoid getByRole('link') for navigation tabs.
+
+AUTHENTICATION RULES (must follow — security requirement):
+- NEVER hardcode usernames, passwords, or any credentials in the test code.
+- If the test requires a logged-in session, add: test.use({{ storageState: 'studio/.auth/<appName>.json' }});
+- For apps that start logged-in already, omit the storageState line entirely.
+
+Include proper waits and error handling.
+Output ONLY the code, no markdown or explanations."""
+                    }],
+                    max_tokens=LLM_MAX_TOKENS,
+                    temperature=LLM_TEMPERATURE,
+                )
+                generated_code = _clean_healed_code(fallback_resp.choices[0].message.content.strip())
+                logger.info(f"[PHASE 0-FALLBACK] ✅ Text-only code generated ({len(generated_code)} chars)")
+                log_json_result(0, "FALLBACK", "Text-only synthesis succeeded — will validate via Phase 1+2", {
+                    "original_error": str(e),
+                    "code_chars": len(generated_code),
+                    "inferred_url": url,
+                })
+            except Exception as e2:
+                logger.error(f"[PHASE 0-FALLBACK] ❌ Text-only synthesis also failed: {str(e2)}")
+                log_json_result(0, "FAILED", f"Both vision and text-only synthesis failed", {})
+                return {
+                    "error": f"Phase 0 failed: {str(e)} | Text-only fallback also failed: {str(e2)}",
+                    "generatedCode": "",
+                    "phase1Pass": False,
+                    "phase1Message": f"Phase 0 failed: {str(e)}",
+                    "phase2Updated": False,
+                    "phase2Changes": [],
+                    "phase2SkipReason": "Phase 0 and fallback both failed — no code generated",
+                    "tunedCode": "",
+                    "phase3Pass": False,
+                    "phase3Message": "Not run (Phase 0 and fallback failed)",
+                    "readyForGolden": False,
+                    "recommendation": f"Check your Azure OpenAI config. Vision error: {str(e)}. Fallback error: {str(e2)}"
+                }
 
         generated_code = generated_code.strip()
         logger.info(f"[PHASE 0] ✅ Code generated successfully ({len(generated_code)} chars, {len(generated_code.split(chr(10)))} lines)")
@@ -707,10 +786,13 @@ Output ONLY the code, no markdown or explanations."""
                 {"round": round_num, "code_chars": len(current_code)}
             )
 
-            p1_result  = await validate_test_locally(current_code, f"synthesis_temp_r{round_num}")
-            phase1_pass    = p1_result.get("passed", False)
-            phase1_message = p1_result.get("error") or "Test executed successfully"
-            p1_duration    = p1_result.get("duration", 0)
+            p1_result       = await validate_test_locally(current_code, f"synthesis_temp_r{round_num}")
+            phase1_pass     = p1_result.get("passed", False)
+            phase1_message  = p1_result.get("error") or "Test executed successfully"
+            p1_duration     = p1_result.get("duration", 0)
+            # Failure screenshot captured by validate-test.js at the moment of
+            # failure — shows the actual failing page, not a fresh homepage load.
+            failure_shot_b64 = p1_result.get("failureScreenshot")
 
             round_entry = {
                 "round":          round_num,
@@ -772,45 +854,54 @@ Output ONLY the code, no markdown or explanations."""
             )
 
             try:
-                # Navigate to the page and capture current state so the LLM
-                # sees exactly what is on screen before proposing a selector fix
-                pb2      = await async_playwright().start()
-                browser2 = await pb2.chromium.launch()
-                page2    = await browser2.new_page()
-                for _w, _t in [('domcontentloaded', 30000), ('load', 30000), ('commit', 45000)]:
-                    try:
-                        await page2.goto(url, wait_until=_w, timeout=_t)
-                        break
-                    except Exception:
-                        pass
-                await page2.wait_for_timeout(2000)
-                heal_shot_bytes = await page2.screenshot(full_page=False)
-                heal_shot_b64   = base64.b64encode(heal_shot_bytes).decode('utf-8')
-                await browser2.close()
-                await pb2.stop()
+                # Prefer the failure screenshot captured by validate-test.js at the
+                # exact moment the test broke — it shows the right page (e.g. an
+                # article page), not a fresh re-navigation to the starting URL.
+                # Fall back to navigating to url only when no failure screenshot
+                # is available (older test-results dir, screenshot disabled, etc.).
+                heal_shot_b64 = failure_shot_b64
 
-                logger.info(
-                    f"[PHASE 2 · Round {round_num}] ✅ Screenshot captured "
-                    f"({len(heal_shot_bytes)//1024}KB) — sending to GPT-4V"
-                )
-                round_entry["screenshot_for_heal"] = True
-                round_entry["screenshot_kb"] = len(heal_shot_bytes) // 1024
+                if heal_shot_b64:
+                    logger.info(
+                        f"[PHASE 2 · Round {round_num}] ✅ Using failure-time screenshot "
+                        f"from Phase 1 — shows the exact failing page state"
+                    )
+                    round_entry["screenshot_for_heal"] = True
+                    round_entry["screenshot_kb"] = len(heal_shot_b64) * 3 // 4 // 1024
+                elif url:
+                    logger.info(
+                        f"[PHASE 2 · Round {round_num}] No failure screenshot — "
+                        f"navigating to {url} for a fresh screenshot"
+                    )
+                    pb2      = await async_playwright().start()
+                    browser2 = await pb2.chromium.launch()
+                    page2    = await browser2.new_page()
+                    for _w, _t in [('domcontentloaded', 30000), ('load', 30000), ('commit', 45000)]:
+                        try:
+                            await page2.goto(url, wait_until=_w, timeout=_t)
+                            break
+                        except Exception:
+                            pass
+                    await page2.wait_for_timeout(2000)
+                    heal_shot_bytes = await page2.screenshot(full_page=False)
+                    heal_shot_b64   = base64.b64encode(heal_shot_bytes).decode('utf-8')
+                    await browser2.close()
+                    await pb2.stop()
 
-                heal_response = client.chat.completions.create(
-                    model=DEPLOYMENT,
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{heal_shot_b64}"
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": f"""This Playwright test failed (Round {round_num} of {MAX_HEAL_ROUNDS}).
-Look at the screenshot to identify the correct element, then fix the test.
+                    logger.info(
+                        f"[PHASE 2 · Round {round_num}] ✅ Fallback screenshot captured "
+                        f"({len(heal_shot_bytes)//1024}KB)"
+                    )
+                    round_entry["screenshot_for_heal"] = True
+                    round_entry["screenshot_kb"] = len(heal_shot_bytes) // 1024
+                else:
+                    logger.warning(
+                        f"[PHASE 2 · Round {round_num}] No screenshot available — using text-only healing"
+                    )
+                    round_entry["screenshot_for_heal"] = False
+
+                heal_text = f"""This Playwright test failed (Round {round_num} of {MAX_HEAL_ROUNDS}).
+{"Look at the screenshot to identify the correct element, then fix the test." if heal_shot_b64 else "Analyse the error and fix the test code."}
 
 FAILURE ERROR:
 {phase1_message}
@@ -825,14 +916,28 @@ SELECTOR RULES (use in this order):
 4. Plain text         → getByText('...', {{ exact: true }})
 ❌ NEVER use getByRole('link') for navigation tabs — those elements use role="menuitem".
 
-Study the screenshot carefully. Identify the exact element the test is trying to reach.
+AUTHENTICATION RULES (must preserve — security requirement):
+- If the existing code has a test.use({{ storageState: ... }}) line, keep it exactly as-is.
+- NEVER replace storageState with hardcoded credentials, even as a debugging aid.
+- NEVER introduce usernames or passwords anywhere in the code.
+
+{"Study the screenshot carefully. Identify the exact element the test is trying to reach." if heal_shot_b64 else ""}
 Fix only the broken selector/action. Keep all other test logic unchanged.
 Output ONLY the corrected TypeScript code. No markdown fences."""
-                            }
-                        ]
-                    }],
+
+                if heal_shot_b64:
+                    heal_content = [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{heal_shot_b64}"}},
+                        {"type": "text", "text": heal_text},
+                    ]
+                else:
+                    heal_content = heal_text
+
+                heal_response = client.chat.completions.create(
+                    model=DEPLOYMENT,
+                    messages=[{"role": "user", "content": heal_content}],
                     max_tokens=2000,
-                    temperature=0.2
+                    temperature=0.2,
                 )
 
                 new_code = heal_response.choices[0].message.content.strip()
@@ -1293,6 +1398,11 @@ Key healing patterns:
 
 CRITICAL: Avoid mixing different selector types (getByRole + locator) in same chain.
 All selectors in a chain must operate in the same frame context.
+
+AUTHENTICATION RULES (must preserve — security requirement):
+- If the existing code has a test.use({ storageState: ... }) line, keep it exactly as-is.
+- NEVER replace storageState with hardcoded credentials, even as a debugging aid.
+- NEVER introduce usernames or passwords anywhere in the code.
 Output ONLY the TypeScript code. No markdown."""
 
     if heal_screenshot_b64:

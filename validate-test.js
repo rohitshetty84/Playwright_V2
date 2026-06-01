@@ -32,6 +32,31 @@ if (!fs.existsSync(testFile)) {
 
 const startTime = Date.now();
 
+// Find the most recently written PNG inside test-results/ that was created
+// after `sinceMs`. Playwright saves failure screenshots there automatically
+// when screenshot: 'only-on-failure' is set in playwright.config.ts.
+function findFailureScreenshot(testResultsDir, sinceMs) {
+  if (!fs.existsSync(testResultsDir)) return null;
+  let latest = null;
+  let latestMtime = sinceMs; // only files newer than the run start
+  function walk(dir) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); }
+      else if (entry.name.endsWith('.png')) {
+        try {
+          const mtime = fs.statSync(full).mtimeMs;
+          if (mtime > latestMtime) { latestMtime = mtime; latest = full; }
+        } catch { /* ignore */ }
+      }
+    }
+  }
+  walk(testResultsDir);
+  return latest;
+}
+
 // Find the tests directory (should be in project root)
 const projectRoot = process.cwd();
 const testsDir = path.join(projectRoot, 'tests');
@@ -119,6 +144,23 @@ try {
         passed: passed,
         timestamp: new Date().toISOString()
       };
+
+      // Attach the failure screenshot so Phase 2 healing sees the exact page
+      // state at the moment of failure — not a fresh re-navigation to the start URL.
+      if (!passed) {
+        const testResultsDir = path.join(projectRoot, 'test-results');
+        const screenshotPath = findFailureScreenshot(testResultsDir, startTime);
+        if (screenshotPath) {
+          try {
+            result.failureScreenshot = fs.readFileSync(screenshotPath).toString('base64');
+            console.log(`[validate] Failure screenshot attached (${Math.round(result.failureScreenshot.length * 0.75 / 1024)}KB): ${screenshotPath}`);
+          } catch (e) {
+            console.log(`[validate] Warning: could not read screenshot: ${e.message}`);
+          }
+        } else {
+          console.log('[validate] No failure screenshot found in test-results/');
+        }
+      }
 
       console.log(JSON.stringify(result));
       process.exit(passed ? 0 : 1);

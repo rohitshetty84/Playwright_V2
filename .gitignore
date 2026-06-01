@@ -39,10 +39,11 @@ blob-report/
 
 # ── Studio runtime data ───────────────────────────────────────────────────────
 # goldens/ is committed (source of truth for tests).
-# Logs, runs, and test-results are runtime artifacts — never commit them.
+# Logs, runs, auth sessions, and test-results are runtime artifacts — never commit them.
 runs/
 studio/runs/
 studio/logs/
+studio/.auth/
 
 # ── Editors / OS ──────────────────────────────────────────────────────────────
 .vscode/
