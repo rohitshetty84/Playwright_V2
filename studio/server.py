@@ -28,6 +28,8 @@ from healing_engine import ErrorSignature, generate_targeted_healing_prompt, ana
 from services.llm import LLMService
 from services import prompts  # noqa: F401 — referenced by string-name in future call sites
 from services.assertions import evaluate as evaluate_assertions  # P1-5
+from services.git_sync import sync_goldens as _sync_goldens_service  # P2-2
+from services.vision_policy import decide as decide_vision, log_decision  # P2-3
 
 # ── Configure Logging ──────────────────────────────────────────────────────────
 BASE = Path(__file__).parent
@@ -448,7 +450,15 @@ async def get_runs():
 
 # ─ Shared: capture a screenshot from a URL for LLM context ───────────────────
 async def capture_screenshot_b64(url: str, label: str = "") -> Optional[str]:
-    """Navigate to url, return base64 PNG or None on failure."""
+    """Navigate to url, return base64 PNG or None on failure.
+
+    P2-3: gated by VISION_ALLOWED_HOSTS — if the URL's hostname is not in the
+    allowlist, returns None and the caller falls back to text-only.
+    """
+    decision = decide_vision(url)
+    log_decision(decision, context=label or "capture_screenshot_b64")
+    if not decision.allowed:
+        return None
     try:
         pb = await async_playwright().start()
         browser = await pb.chromium.launch()
@@ -482,6 +492,14 @@ async def analyze_page_with_vision(url: str, test_description: str) -> str:
 
     try:
         logger.info(f"[VISION] Starting page analysis for {url}")
+
+        # P2-3: vision allowlist check.
+        _vd = decide_vision(url)
+        log_decision(_vd, context="VISION")
+        if not _vd.allowed:
+            raise PermissionError(
+                f"vision blocked by allowlist: {_vd.reason}"
+            )
 
         # Launch browser
         pb = await async_playwright().start()
@@ -629,6 +647,16 @@ async def synthesize_with_validation(req: SynthesizeRequest):
                 raise ValueError("No URL found in test description")
             url = url_match.group(0)
             logger.info(f"[PHASE 0] Detected URL: {url}")
+
+            # P2-3: vision allowlist check — if blocked, fall straight through
+            # to the text-only fallback. This raises so the existing except
+            # branch handles it cleanly.
+            _vd = decide_vision(url)
+            log_decision(_vd, context="PHASE 0")
+            if not _vd.allowed:
+                raise PermissionError(
+                    f"vision blocked by allowlist: {_vd.reason}"
+                )
 
             # Phase 0A: Navigate and capture screenshot
             logger.info("[PHASE 0A] Navigating to page and capturing screenshot...")
@@ -1250,49 +1278,36 @@ Return ONLY JSON: {"suggestions": [{"old": "selector", "new": "better selector",
 
 
 # ─ Save as Golden ──────────────────────────────────────────────────────────────
+# P2-2: hardened git sync delegated to studio/services/git_sync.py.
+# This thin wrapper preserves the legacy {pushed, output, error} shape used by
+# downstream call sites, but exposes the richer result through `_full_result`.
 def git_sync_goldens(message: str) -> dict:
-    """
-    Stage all golden JSON files, commit, and push to origin.
-    Returns {"pushed": bool, "output": str, "error": str|None}.
-    """
-    repo_root = BASE.parent
+    branch = os.getenv("GITHUB_BRANCH", "main")
     try:
-        # Stage only the golden directory so we never accidentally commit secrets
-        stage = subprocess.run(
-            ["git", "add", "studio/golden/"],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=15
+        result = _sync_goldens_service(
+            repo_root=BASE.parent,
+            message=message,
+            expected_branch=branch,
         )
-        if stage.returncode != 0:
-            return {"pushed": False, "output": "", "error": stage.stderr.strip()}
-
-        # Check if there is anything new to commit
-        diff = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=str(repo_root), capture_output=True, timeout=10
-        )
-        if diff.returncode == 0:
-            return {"pushed": False, "output": "Nothing to commit — golden already up to date", "error": None}
-
-        commit = subprocess.run(
-            ["git", "commit", "-m", message],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=15
-        )
-        if commit.returncode != 0:
-            return {"pushed": False, "output": commit.stdout, "error": commit.stderr.strip()}
-
-        push = subprocess.run(
-            ["git", "push"],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=30
-        )
-        if push.returncode != 0:
-            return {"pushed": False, "output": push.stdout, "error": push.stderr.strip()}
-
-        logger.info(f"[git-sync] ✅ Pushed: {message}")
-        return {"pushed": True, "output": push.stdout.strip() or "Pushed successfully", "error": None}
-
     except Exception as e:
-        logger.warning(f"[git-sync] ⚠️  {e}")
+        logger.exception("[git-sync] unexpected error")
         return {"pushed": False, "output": "", "error": str(e)}
+
+    if result.pushed:
+        logger.info(f"[git-sync] ✅ {result.message}")
+    elif result.skipped:
+        logger.info(f"[git-sync] ⏭️  {result.message}")
+    else:
+        logger.warning(f"[git-sync] ⚠️  {result.message}: {result.error or ''}")
+
+    # Legacy shape kept for backward compat with existing handlers.
+    return {
+        "pushed": result.pushed,
+        "output": result.message,
+        "error": result.error,
+        # Richer fields for newer call sites + UI:
+        "_full_result": result.to_dict(),
+    }
 
 
 @app.post("/api/goldens")
@@ -1320,7 +1335,15 @@ async def create_golden(req: SaveGoldenRequest):
     else:
         logger.warning(f"[create_golden] ⚠️  Git sync skipped: {sync.get('error') or sync.get('output')}")
 
-    return {**golden, "gitSynced": sync["pushed"], "gitMessage": sync.get("output") or sync.get("error")}
+    # P2-2: include the rich sync result so the UI can show specific feedback
+    # (e.g. "Saved locally — pull --rebase needed before push") instead of a
+    # generic banner.
+    return {
+        **golden,
+        "gitSynced": sync["pushed"],
+        "gitMessage": sync.get("output") or sync.get("error"),
+        "gitDetails": sync.get("_full_result"),
+    }
 
 
 @app.post("/api/goldens/sync")
