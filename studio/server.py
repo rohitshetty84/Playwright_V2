@@ -3,7 +3,8 @@ Playwright AI Studio — Python/FastAPI backend
 Azure OpenAI powered test synthesis & auto-healing
 """
 
-import os, json, uuid, re, subprocess, tempfile, logging, base64
+import os, json, uuid, re, subprocess, tempfile, logging, base64, asyncio
+from collections import defaultdict
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mK]')
 from datetime import datetime
@@ -22,6 +23,11 @@ from dotenv import load_dotenv
 
 # ── Import improved healing engine ─────────────────────────────────────────────
 from healing_engine import ErrorSignature, generate_targeted_healing_prompt, analyze_healing_history
+
+# ── P1-2: extracted prompt + LLM helpers (single source of truth) ──────────────
+from services.llm import LLMService
+from services import prompts  # noqa: F401 — referenced by string-name in future call sites
+from services.assertions import evaluate as evaluate_assertions  # P1-5
 
 # ── Configure Logging ──────────────────────────────────────────────────────────
 BASE = Path(__file__).parent
@@ -117,6 +123,17 @@ client = AzureOpenAI(
 )
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
+# P1-2: shared LLM service. New code should prefer `llm.ask` / `llm.vision_heal`
+# over the legacy `ask_llm()` helper below. The legacy helper is preserved for
+# backward compatibility with the many existing call sites in this file.
+llm = LLMService(
+    client=client,
+    deployment=DEPLOYMENT,
+    default_temperature=0.2,
+    default_max_tokens=1500,
+    vision_max_tokens=2000,
+)
+
 # ── Storage paths ─────────────────────────────────────────────────────────────
 GOLDEN_DIR     = BASE / "golden"
 RUNS_DIR       = BASE / "runs"
@@ -166,20 +183,18 @@ class TriggerCIRequest(BaseModel):
 class ValidateHealRequest(BaseModel):
     golden_id: str
 # ── Azure OpenAI helper ───────────────────────────────────────────────────────
+# Legacy wrapper, now thin: delegates to LLMService + retry, and sanitises
+# error responses (P2-4) so we don't leak full Azure exception strings.
 def ask_llm(system: str, user: str, max_tokens: int = LLM_MAX_TOKENS) -> str:
     try:
-        resp = client.chat.completions.create(
-            model=DEPLOYMENT,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            max_tokens=max_tokens,
-            temperature=LLM_TEMPERATURE,
-        )
-        return resp.choices[0].message.content or ""
+        return llm.ask(system=system, user=user, max_tokens=max_tokens)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Azure OpenAI error: {e}")
+        logger.exception("[ask_llm] Azure OpenAI call failed")
+        # P2-4: don't leak provider error details to API clients.
+        raise HTTPException(
+            status_code=502,
+            detail="LLM request failed — see server logs for details.",
+        )
 
 # ── File helpers ──────────────────────────────────────────────────────────────
 def load_goldens() -> list[dict]:
@@ -201,10 +216,23 @@ def load_runs() -> list[dict]:
     return out
 
 def save_json(directory: Path, id: str, data: dict):
-    (directory / f"{id}.json").write_text(json.dumps(data, indent=2))
+    # P0-3: write atomically — tmp file then rename — so a half-written JSON
+    # file can never be read by another request.
+    target = directory / f"{id}.json"
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(target)
 
 def ts_now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+# ── P0-3: per-golden-id locks for concurrent read-modify-write ────────────────
+# Two heal requests on the same golden could otherwise clobber each other's
+# history entries. The lock guards the whole RMW sequence, not just the write.
+_golden_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+def golden_lock(golden_id: str) -> asyncio.Lock:
+    return _golden_locks[golden_id]
 
 # ── Healing History Helper Functions ──────────────────────────────────────────
 def load_healing_history(golden_id: str) -> list:
@@ -218,13 +246,23 @@ def load_healing_history(golden_id: str) -> list:
         return []
 
 def save_healing_attempt(golden_id: str, attempt: dict):
-    """Save a healing attempt with metadata"""
+    """Save a healing attempt with metadata.
+
+    NOTE: This is intentionally synchronous so existing call sites that aren't
+    in async contexts keep working. For new code use `save_healing_attempt_locked`
+    which holds the per-golden lock across the read-modify-write sequence.
+    """
     history = load_healing_history(golden_id)
     attempt["attemptNumber"] = len(history) + 1
     attempt["timestamp"] = ts_now()
     history.append(attempt)
     save_json(HEALING_DIR, f"{golden_id}_history", history)
     logger.info(f"[healing] Recorded attempt #{attempt['attemptNumber']} for golden {golden_id}")
+
+async def save_healing_attempt_locked(golden_id: str, attempt: dict):
+    """P0-3: lock-protected RMW for healing history. Use this in async handlers."""
+    async with golden_lock(golden_id):
+        save_healing_attempt(golden_id, attempt)
 
 def get_healing_failures_for_error(golden_id: str, error_msg: str) -> list:
     """Get all failed healing attempts for a specific error"""
@@ -329,20 +367,29 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
             if result.stderr:
                 logger.debug(f"[validation] Stderr: {result.stderr[:500]}")
 
-            # Parse JSON result — stdout contains [validate] log lines before the JSON
-            try:
-                for line in reversed(result.stdout.strip().splitlines()):
-                    line = line.strip()
-                    if line.startswith('{'):
-                        return json.loads(line)
-                raise json.JSONDecodeError("No JSON line found in output", result.stdout, 0)
-            except json.JSONDecodeError:
-                return {
-                    "status": "ERROR",
-                    "error": f"Failed to parse validation result: {result.stdout[:500]}",
-                    "duration": 0,
-                    "passed": False
-                }
+            # Parse JSON result.
+            # P0-2 fix: validate-test.js's [validate] log lines come BEFORE the
+            # final result line, AND Playwright's JSON reporter dumps a single
+            # massive JSON blob to stdout that we must not confuse with our own
+            # result. Scan from the END for the last line that is a complete,
+            # parseable JSON object.
+            parsed = None
+            for line in reversed(result.stdout.strip().splitlines()):
+                line = line.strip()
+                if line.startswith('{') and line.endswith('}'):
+                    try:
+                        parsed = json.loads(line)
+                        break
+                    except json.JSONDecodeError:
+                        continue  # keep searching upward
+            if parsed is not None:
+                return parsed
+            return {
+                "status": "ERROR",
+                "error": f"Failed to parse validation result: {result.stdout[:500]}",
+                "duration": 0,
+                "passed": False
+            }
 
         finally:
             # Clean up temp file
@@ -1098,6 +1145,28 @@ Return ONLY JSON: {"suggestions": [{"old": "selector", "new": "better selector",
                             {"heal_rounds": len(heal_history),
                              "heal_history": heal_history})
 
+        # ─── P1-5: Assertion-strength check on the final code ─────────────────
+        # A passing test that asserts on the wrong thing is worse than failing.
+        # We don't block promotion on weak assertions — we surface them so the
+        # user can decide.
+        final_code = tuned_code if phase2_updated else generated_code
+        assertion_report = evaluate_assertions(final_code)
+        logger.info(
+            f"[ASSERTION CHECK] score={assertion_report.score}/100, "
+            f"{assertion_report.assertion_count} assertion(s), "
+            f"{assertion_report.weak_count} warning(s)"
+        )
+        if assertion_report.weak_count:
+            for w in assertion_report.warnings[:5]:
+                logger.warning(f"[ASSERTION CHECK] {w.severity.upper()} line {w.line}: {w.rule} — {w.message}")
+            log_json_result("ASSERTION_CHECK", "WARN",
+                            f"Detected {assertion_report.weak_count} weak assertion(s)",
+                            assertion_report.to_dict())
+        else:
+            log_json_result("ASSERTION_CHECK", "SUCCESS",
+                            "All assertions look strong",
+                            assertion_report.to_dict())
+
         # ─── DECISION: Ready for golden? ───────────────────────────────────────
         ready_for_golden = phase1_pass and phase3_pass
 
@@ -1156,6 +1225,8 @@ Return ONLY JSON: {"suggestions": [{"old": "selector", "new": "better selector",
             "recommendation": recommendation,
             "healRoundsUsed": heal_rounds_used,
             "healHistory": heal_history,
+            # P1-5: assertion-strength report for the UI
+            "assertionReport": assertion_report.to_dict(),
         }
 
     except Exception as e:
@@ -1278,10 +1349,15 @@ async def record_run(req: RunRequest):
     save_json(RUNS_DIR, rid, run)
 
     # ── NEW: Detect if this is a post-healing run and check if healing succeeded ──
+    # P0-3: serialize healing-history writes for this golden so concurrent
+    # /api/runs calls (CI + manual + scheduled) can't clobber each other.
     if golden and golden.get("healCount", 0) > 0:
+      async with golden_lock(req.golden_id):
         # This golden has been healed before
         has_failures = any(c.get("status") == "fail" for c in req.candidates)
         error_msg = None
+        # P0-1 fix: hoist `history` out of the if-branch so the else-branch can read it
+        history = load_healing_history(req.golden_id)
 
         if has_failures:
             # Find the first error
@@ -1291,7 +1367,6 @@ async def record_run(req: RunRequest):
                     break
 
             # Check if this is the same error as before
-            history = load_healing_history(req.golden_id)
             if history:
                 last_attempt = history[-1]
                 if last_attempt.get("error") == error_msg:
@@ -1571,8 +1646,8 @@ Strategy: Apply targeted fix for '{root_cause}' instead of generic selector fixe
             "readyToPromote": validation_result["status"] == "PASS",
         }
 
-        # Step 4: Record healing attempt with diagnosis
-        save_healing_attempt(golden_id, {
+        # Step 4: Record healing attempt with diagnosis — P0-3 lock-protected
+        await save_healing_attempt_locked(golden_id, {
             "fix": f"Applied targeted fix for root cause: {root_cause}",
             "rootCause": root_cause,
             "confidence": confidence,
@@ -1610,29 +1685,31 @@ Strategy: Apply targeted fix for '{root_cause}' instead of generic selector fixe
 # ─ Promote healed code as new Golden ─────────────────────────────────────────
 @app.patch("/api/goldens/{golden_id}/promote")
 async def promote_healed(golden_id: str, body: PromoteGoldenRequest):
-    goldens = load_goldens()
-    golden = next((g for g in goldens if g["id"] == golden_id), None)
-    if not golden:
-        raise HTTPException(status_code=404, detail="Golden not found")
+    # P0-3: lock the whole RMW (load → mutate → save golden + history) for this id.
+    async with golden_lock(golden_id):
+        goldens = load_goldens()
+        golden = next((g for g in goldens if g["id"] == golden_id), None)
+        if not golden:
+            raise HTTPException(status_code=404, detail="Golden not found")
 
-    if not body.code.strip():
-        raise HTTPException(status_code=400, detail="Promoted code cannot be empty")
+        if not body.code.strip():
+            raise HTTPException(status_code=400, detail="Promoted code cannot be empty")
 
-    golden["code"] = body.code
-    golden["healCount"] = golden.get("healCount", 0) + 1
-    golden["lastHealed"] = ts_now()
-    save_json(GOLDEN_DIR, golden_id, golden)
+        golden["code"] = body.code
+        golden["healCount"] = golden.get("healCount", 0) + 1
+        golden["lastHealed"] = ts_now()
+        save_json(GOLDEN_DIR, golden_id, golden)
 
-    # ── NEW: Save this healing attempt to history ──────────────────────────
-    # Find what the fix was by comparing code or using a marker
-    save_healing_attempt(golden_id, {
-        "fix": "Generated fix from Azure OpenAI",
-        "error": "TBD - will be confirmed when tests run",
-        "succeeded": None,  # Pending - will be updated when test runs
-        "result": "Promoted and awaiting test results",
-        "testResult": "PENDING"
-    })
-    logger.info(f"[promote] Saved healing attempt #{golden.get('healCount')} for {golden_id}")
+        # ── NEW: Save this healing attempt to history ──────────────────────────
+        # Find what the fix was by comparing code or using a marker
+        save_healing_attempt(golden_id, {
+            "fix": "Generated fix from Azure OpenAI",
+            "error": "TBD - will be confirmed when tests run",
+            "succeeded": None,  # Pending - will be updated when test runs
+            "result": "Promoted and awaiting test results",
+            "testResult": "PENDING"
+        })
+        logger.info(f"[promote] Saved healing attempt #{golden.get('healCount')} for {golden_id}")
 
     # ── Auto-trigger GitHub Actions to test the healed golden ──────────────────
     # This ensures the healed code is tested with the updated golden file

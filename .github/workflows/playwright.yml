@@ -1,5 +1,10 @@
 name: Playwright Tests
 
+# P2-6: matrix strategy — discover all goldens (or use the requested subset),
+# then run ONE matrix entry per golden in parallel. Wins: linear speedup,
+# failure isolation (one broken golden doesn't blow up the others), and
+# per-golden artifacts that are easy to triage.
+
 on:
   workflow_dispatch:
     inputs:
@@ -15,11 +20,72 @@ on:
         description: 'Golden test name'
         required: false
         type: string
+  push:
+    branches: [main]
+    paths:
+      - 'studio/golden/**'
+      - 'tests/**'
+      - '.github/workflows/playwright.yml'
 
 jobs:
-  test:
-    timeout-minutes: 30
+  # ── Discover which goldens this run will cover ──────────────────────────────
+  discover:
     runs-on: ubuntu-latest
+    outputs:
+      goldens: ${{ steps.list.outputs.goldens }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build golden list
+        id: list
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ inputs.golden_ids }}" ]; then
+            IDS="${{ inputs.golden_ids }}"
+            SOURCE="workflow_dispatch.inputs.golden_ids"
+          elif [ -n "${{ inputs.golden_id }}" ]; then
+            IDS="${{ inputs.golden_id }}"
+            SOURCE="workflow_dispatch.inputs.golden_id"
+          else
+            # Default: discover every JSON file in studio/golden/
+            IDS=$(ls studio/golden/*.json 2>/dev/null | xargs -n1 basename | sed 's/\.json$//' | paste -sd,)
+            SOURCE="auto-discovered from studio/golden/"
+          fi
+
+          if [ -z "$IDS" ]; then
+            echo "::error::No goldens found and none specified."
+            exit 1
+          fi
+
+          # Build a JSON array for the matrix.
+          JSON=$(printf "%s\n" "$IDS" | tr ',' '\n' | sed '/^$/d' | jq -R . | jq -sc .)
+          COUNT=$(echo "$JSON" | jq 'length')
+
+          echo "goldens=$JSON" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT"   >> "$GITHUB_OUTPUT"
+
+          echo "## Discovered goldens"           >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                >> "$GITHUB_STEP_SUMMARY"
+          echo "**Source:** $SOURCE"             >> "$GITHUB_STEP_SUMMARY"
+          echo "**Count:** $COUNT"               >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                             >> "$GITHUB_STEP_SUMMARY"
+          echo "$JSON" | jq .                    >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                             >> "$GITHUB_STEP_SUMMARY"
+
+  # ── One matrix entry per golden — runs in parallel ─────────────────────────
+  test:
+    needs: discover
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false                 # one broken golden doesn't cancel the rest
+      max-parallel: 6
+      matrix:
+        golden: ${{ fromJson(needs.discover.outputs.goldens) }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -32,58 +98,90 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r ci/requirements.txt
 
-      - name: Install Playwright browsers
-        run: npx playwright install
-
-      - name: Export golden tests to .spec.ts files
-        run: |
-          if [ -n "${{ inputs.golden_ids }}" ]; then
-            python3 ci/export_goldens.py --from studio/golden --to tests --ids "${{ inputs.golden_ids }}"
-          elif [ -n "${{ inputs.golden_id }}" ]; then
-            python3 ci/export_goldens.py --from studio/golden --to tests --ids "${{ inputs.golden_id }}"
-          else
-            python3 ci/export_goldens.py --from studio/golden --to tests
-          fi
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # P2-7: include the Playwright version in the cache key so a version
+          # bump doesn't silently reuse stale binaries.
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json') }}
 
       - name: Install npm dependencies
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-      - name: Run Playwright tests
-        run: npx playwright test --reporter=json,html
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Export this golden → tests/<id>.spec.ts
+        run: |
+          python3 ci/export_goldens.py \
+            --from studio/golden \
+            --to tests \
+            --ids "${{ matrix.golden }}"
+          ls -la tests/
+
+      - name: Run Playwright (single golden)
+        run: npx playwright test --reporter=json,html,list
         continue-on-error: true
 
-      - name: Upload test results
+      - name: Upload artifacts (per golden)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
-          path: playwright-report/
+          # Per-matrix-entry artifact name so they don't collide.
+          name: playwright-report-${{ matrix.golden }}
+          path: |
+            playwright-report/
+            test-results/
+            results.json
           retention-days: 30
 
-      - name: Publish test summary
+      - name: Publish per-golden summary
         if: always()
         run: |
           REPORT="playwright-report/results.json"
           if [ ! -f "$REPORT" ]; then
-            echo "## Playwright Tests" >> $GITHUB_STEP_SUMMARY
-            echo "No JSON report found." >> $GITHUB_STEP_SUMMARY
+            echo "## Golden \`${{ matrix.golden }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "No JSON report found." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           TOTAL=$(jq '[.suites[].specs[]] | length' "$REPORT" 2>/dev/null || echo 0)
           PASSED=$(jq '[.suites[].specs[] | select(.tests[].results[].status == "passed")] | length' "$REPORT" 2>/dev/null || echo 0)
           FAILED=$(jq '[.suites[].specs[] | select(.tests[].results[].status == "failed")] | length' "$REPORT" 2>/dev/null || echo 0)
-          echo "## Playwright Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "| Result | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
-          echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
-          echo "| 📋 Total  | $TOTAL |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Full HTML report available in the **playwright-report** artifact above." >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Golden \`${{ matrix.golden }}\`"
+            echo ""
+            echo "| Result | Count |"
+            echo "|--------|-------|"
+            echo "| Passed | $PASSED |"
+            echo "| Failed | $FAILED |"
+            echo "| Total  | $TOTAL |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Aggregate roll-up across all matrix entries ────────────────────────────
+  rollup:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Note matrix result
+        run: |
+          # `test` is the matrix job; `needs.test.result` is the overall result
+          # (success only if every matrix entry succeeded).
+          echo "Matrix result: ${{ needs.test.result }}"
+          {
+            echo "## Matrix roll-up"
+            echo ""
+            echo "Overall: \`${{ needs.test.result }}\`"
+            echo ""
+            echo "_Per-golden details are in the individual job summaries above._"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "${{ needs.test.result }}" = "success" ] || exit 1

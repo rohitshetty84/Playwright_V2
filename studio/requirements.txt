@@ -1,6 +1,17 @@
+# studio/requirements.txt — dependencies for the FastAPI backend.
+#
+# Install:
+#   pip install -r studio/requirements.txt
+#
+# This file is intentionally distinct from ci/requirements.txt — the CI
+# pipeline runs only the helper scripts under ci/ and doesn't need to install
+# fastapi/openai/playwright. Don't merge them.
+
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 openai==1.55.0
 httpx==0.27.0
 python-dotenv==1.0.1
 pydantic==2.9.2
+requests==2.32.3        # used by /api/trigger-ci to call the GitHub API
+playwright==1.48.0      # used by validate_test_locally + screenshot helpers

@@ -118,32 +118,142 @@ Example:
     .first();"""
         },
         "timing_race": {
-            "pattern": r"waitFor|timing|race|async",
-            "description": "Timing issue or async race condition with frame availability",
+            # P1-10: tightened — old regex matched "async" which is in every Playwright test.
+            "pattern": r"(net::ERR_|page\.goto.*Timeout|navigation timeout|page closed)",
+            "description": "Page didn't load — navigation timeout or network error",
             "indicators": [
-                "timeout",
-                "networkidle",
-                "load",
-                "timing",
-                "element not found"
+                "page.goto: Timeout",
+                "navigation timeout",
+                "net::ERR_",
+                "page closed",
             ],
-            "fix_strategy": "ADD_EXPLICIT_WAITS",
-            "fix_prompt": """The error might be a timing issue where the frame isn't ready.
+            "fix_strategy": "INCREASE_NAVIGATION_TIMEOUT",
+            "fix_prompt": """The error is caused by the page failing to load within the timeout.
 
 FIX:
-1. Add page.waitForLoadState('networkidle') after navigation
-2. Use page.waitForSelector() before locating elements
-3. Use .first() on locators to handle multiple matches safely
-4. Ensure all async operations complete before assertions
+1. Increase navigation timeout: page.goto(url, { timeout: 60_000 })
+2. Use a more lenient wait condition: { waitUntil: 'domcontentloaded' }
+3. After goto, wait for a SPECIFIC element instead of networkidle (which is flaky).
+4. If the URL is occasionally slow, add a retry block around page.goto.
 
-Add these wait patterns:
-  await page.goto(url);
-  await page.waitForLoadState('networkidle');
+Pattern:
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  // Wait for something real — not networkidle:
+  await expect(page.getByRole('heading')).toBeVisible({ timeout: 30_000 });"""
+        },
 
-  // Before using a locator:
-  await page.waitForSelector('main a');
-  const el = page.locator('main a').first();"""
-        }
+        # ── P1-9: cookie / consent banner intercepts ───────────────────────────
+        "cookie_banner_intercept": {
+            "pattern": r"(intercepted|element receives pointer-events|<button[^>]*(Accept|Consent|Cookie))",
+            "description": "Cookie / GDPR / consent banner is intercepting clicks",
+            "indicators": [
+                "intercepts pointer events",
+                "intercepted",
+                "Accept all",
+                "consent",
+                "cookie",
+            ],
+            "fix_strategy": "DISMISS_BANNER_FIRST",
+            "fix_prompt": """The error is caused by a cookie / consent banner sitting on top of your target element.
+
+FIX:
+1. After page.goto, dismiss the banner BEFORE interacting with the page:
+   await page.getByRole('button', { name: /accept|agree|got it/i })
+     .click({ timeout: 5_000 })
+     .catch(() => { /* no banner — that's fine */ });
+2. Make the dismiss tolerant — many CI runs won't see a banner at all.
+3. If the banner is in an iframe, use page.frameLocator('iframe[id*="consent"]')."""
+        },
+
+        # ── P1-9: modal / overlay intercepts click ─────────────────────────────
+        "modal_overlay_intercept": {
+            "pattern": r"(intercepted|<div[^>]*modal|<div[^>]*overlay)",
+            "description": "A modal dialog or overlay is blocking interaction",
+            "indicators": [
+                "intercepts pointer events",
+                "modal",
+                "overlay",
+                "backdrop",
+                "dialog",
+            ],
+            "fix_strategy": "DISMISS_MODAL_FIRST",
+            "fix_prompt": """A modal or overlay is between the test and the target element.
+
+FIX:
+1. Identify the modal close button — usually getByRole('button', { name: /close|dismiss/i }).
+2. Click it before continuing, with a tolerant timeout.
+3. If the modal appears mid-flow, the test should expect it explicitly:
+     await page.getByRole('dialog').getByRole('button', { name: 'Close' }).click();
+4. Never use .force() — that masks the issue instead of fixing it."""
+        },
+
+        # ── P1-9: assertion mismatch (test ran, expectation failed) ────────────
+        "assertion_mismatch": {
+            "pattern": r"(expect\([^)]*\)\..*Expected|Received string:|to have text|toHaveText|toContainText)",
+            "description": "Test ran successfully but an assertion didn't match",
+            "indicators": [
+                "Expected:",
+                "Received:",
+                "toHaveText",
+                "toContainText",
+                "Expected substring",
+            ],
+            "fix_strategy": "SOFTEN_OR_NARROW_ASSERTION",
+            "fix_prompt": """The selector worked, but the assertion's expected value didn't match the page.
+
+FIX (one of these, depending on intent):
+1. If the wording on the page changed: update the expected string.
+2. If the assertion was too strict: use a regex with toMatch():
+     await expect(locator).toHaveText(/playwright/i);
+3. If the test just needs to confirm presence: use toBeVisible() instead of text equality.
+4. If the page is i18n and the test is locale-dependent: pin the locale via test.use({ locale: 'en-US' }).
+
+DO NOT delete the assertion. A test that asserts nothing passes for the wrong reason."""
+        },
+
+        # ── P1-9: iframe traversal needed ──────────────────────────────────────
+        "iframe_traversal": {
+            "pattern": r"(<iframe|inside an iframe|frameLocator|cross-origin)",
+            "description": "Target element lives inside an iframe",
+            "indicators": [
+                "iframe",
+                "frame-locator",
+                "cross-origin frame",
+                "frameLocator",
+            ],
+            "fix_strategy": "USE_FRAME_LOCATOR",
+            "fix_prompt": """The element lives inside an iframe. page.locator() doesn't traverse iframes.
+
+FIX:
+1. Identify the iframe by attribute: src, name, id, or title.
+2. Use frameLocator to traverse:
+     const frame = page.frameLocator('iframe[title="Payment"]');
+     await frame.getByLabel('Card number').fill('4242 4242 4242 4242');
+3. If the frame is cross-origin, you can still interact with its DOM via frameLocator —
+   but you cannot read its cookies / localStorage."""
+        },
+
+        # ── P1-9: element re-rendered (locator detached) ───────────────────────
+        "stale_locator": {
+            "pattern": r"(detached|stale|element is not attached|context destroyed)",
+            "description": "Locator points to an element that re-rendered between locate and act",
+            "indicators": [
+                "element is not attached",
+                "detached from DOM",
+                "Execution context was destroyed",
+            ],
+            "fix_strategy": "RELOCATE_BEFORE_EACH_ACTION",
+            "fix_prompt": """The element was re-rendered between when you located it and when you tried to act on it.
+
+FIX:
+1. Don't reuse a locator across re-renders. Re-locate immediately before each action:
+     await page.getByRole('button', { name: 'Save' }).click();
+     // After the click, the form re-renders. To check the new state:
+     await expect(page.getByText(/saved/i)).toBeVisible();
+2. If you need a stable reference, wait for the re-render to settle:
+     await expect(page.getByRole('button', { name: 'Save' })).toBeVisible();
+3. Avoid storing locator results in variables across awaits — they go stale."""
+        },
     }
 
     @classmethod
@@ -203,11 +313,71 @@ Add these wait patterns:
                 "evidence": "Generic frame error - likely timing issue"
             }
 
-        # ═══ PRIORITY 3: Generic timeout errors (broader match) ═══
+        # ═══ PRIORITY 3: P1-9 new specific patterns ═══
+
+        # Cookie / consent banner intercept
+        if ("intercept" in error_lower and ("cookie" in error_lower or "consent" in error_lower
+                                            or "accept" in error_lower)):
+            return {
+                "root_cause": "cookie_banner_intercept",
+                "confidence": 0.90,
+                "pattern": cls.FRAME_ERROR_PATTERNS["cookie_banner_intercept"],
+                "evidence": "Pointer-events intercepted by consent/cookie banner",
+            }
+
+        # Modal / overlay intercept (general)
+        if "intercept" in error_lower and ("modal" in error_lower or "overlay" in error_lower
+                                           or "dialog" in error_lower or "backdrop" in error_lower):
+            return {
+                "root_cause": "modal_overlay_intercept",
+                "confidence": 0.85,
+                "pattern": cls.FRAME_ERROR_PATTERNS["modal_overlay_intercept"],
+                "evidence": "Pointer-events intercepted by modal/overlay",
+            }
+
+        # Assertion mismatch (test ran, expectation failed)
+        if any(s in error_lower for s in ("expected:", "received:", "tohavetext",
+                                          "tocontaintext", "expected substring")):
+            return {
+                "root_cause": "assertion_mismatch",
+                "confidence": 0.90,
+                "pattern": cls.FRAME_ERROR_PATTERNS["assertion_mismatch"],
+                "evidence": "Expect() assertion's expected value didn't match the page",
+            }
+
+        # Iframe required
+        if "iframe" in error_lower or "frame-locator" in error_lower or "cross-origin" in error_lower:
+            return {
+                "root_cause": "iframe_traversal",
+                "confidence": 0.85,
+                "pattern": cls.FRAME_ERROR_PATTERNS["iframe_traversal"],
+                "evidence": "Target element lives inside an iframe",
+            }
+
+        # Stale locator
+        if "detached" in error_lower or "context was destroyed" in error_lower \
+                or "not attached" in error_lower:
+            return {
+                "root_cause": "stale_locator",
+                "confidence": 0.90,
+                "pattern": cls.FRAME_ERROR_PATTERNS["stale_locator"],
+                "evidence": "Element re-rendered between locate and act",
+            }
+
+        # Navigation timeout (page didn't load)
+        if "page.goto" in error_lower and "timeout" in error_lower:
+            return {
+                "root_cause": "timing_race",  # reusing the now-narrowed "navigation" bucket
+                "confidence": 0.90,
+                "pattern": cls.FRAME_ERROR_PATTERNS["timing_race"],
+                "evidence": "page.goto() timed out — page didn't load in time",
+            }
+
+        # ═══ PRIORITY 4: Generic timeout errors (broadest fallback) ═══
         if "timeout" in error_lower or "waiting for" in error_lower:
             return {
                 "root_cause": "selector_timeout",
-                "confidence": 0.80,
+                "confidence": 0.70,
                 "pattern": cls.FRAME_ERROR_PATTERNS.get("selector_timeout", {}),
                 "evidence": "Generic timeout detected - likely selector timeout"
             }
@@ -352,16 +522,23 @@ FIX RULES:
 4. Keep all locators in the same frame context"""
 
     elif root_cause == "timing_race":
-        system = base_system + """
+        # Now means "navigation timeout / page didn't load" after P1-10 narrowing.
+        system = base_system + "\n\n" + pattern.get("fix_prompt", "")
 
-ROOT CAUSE: Timing issue or race condition with frame availability
-STRATEGY: Add explicit waits and proper async handling
+    elif root_cause == "cookie_banner_intercept":
+        system = base_system + "\n\n" + pattern.get("fix_prompt", "")
 
-FIX RULES:
-1. After page.goto(), add: await page.waitForLoadState('networkidle');
-2. Before using locators for elements, use: await page.waitForSelector(selector);
-3. Use .first() on locators to handle multiple matches safely
-4. Ensure all async operations complete before assertions"""
+    elif root_cause == "modal_overlay_intercept":
+        system = base_system + "\n\n" + pattern.get("fix_prompt", "")
+
+    elif root_cause == "assertion_mismatch":
+        system = base_system + "\n\n" + pattern.get("fix_prompt", "")
+
+    elif root_cause == "iframe_traversal":
+        system = base_system + "\n\n" + pattern.get("fix_prompt", "")
+
+    elif root_cause == "stale_locator":
+        system = base_system + "\n\n" + pattern.get("fix_prompt", "")
 
     else:
         system = base_system

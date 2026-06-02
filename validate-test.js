@@ -109,12 +109,20 @@ try {
       let errorMessage = null;
       let jsonOutput = null;
 
-      // Parse JSON output
+      // Parse JSON output — Playwright's JSON reporter dumps a giant single-line
+      // JSON blob to stdout, so we can't just "find the first {-line". Instead,
+      // pick the *last* line that looks like a complete JSON object. Our own
+      // result line (emitted at the bottom of this script) will always win.
       try {
-        const lines = (stdout || '').split('\n');
-        const jsonLine = lines.find(line => line.trim().startsWith('{'));
-        if (jsonLine) {
-          jsonOutput = JSON.parse(jsonLine);
+        const lines = (stdout || '').split('\n').map(l => l.trim());
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i];
+          if (line.startsWith('{') && line.endsWith('}')) {
+            try {
+              jsonOutput = JSON.parse(line);
+              break;
+            } catch { /* not parseable — keep searching */ }
+          }
         }
       } catch (e) {
         // JSON parse failed

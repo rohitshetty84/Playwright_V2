@@ -1,1 +1,6 @@
+# ci/requirements.txt — dependencies for the CI helper scripts only.
+#
+# Used by .github/workflows/playwright.yml. Keep minimal — every package here
+# is installed on every CI run and we don't want to slow them down.
+
 requests>=2.31.0
