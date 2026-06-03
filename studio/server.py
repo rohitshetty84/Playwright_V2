@@ -117,13 +117,32 @@ load_dotenv()
 if ROOT_ENV.exists():
     load_dotenv(ROOT_ENV, override=False)
 
-# ── Azure OpenAI client ───────────────────────────────────────────────────────
+# ── Azure OpenAI client (vision / synthesis) ─────────────────────────────────
 client = AzureOpenAI(
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
 )
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+
+# ── Azure OpenAI reasoning client (o4-mini) ───────────────────────────────────
+# Used by the exploration engine for planning and self-correction.
+# Falls back to the main client/deployment if not configured.
+_reasoning_deployment  = os.getenv("AZURE_REASONING_DEPLOYMENT", "").strip()
+_reasoning_api_version = os.getenv("AZURE_REASONING_API_VERSION", "2024-12-01-preview").strip()
+
+if _reasoning_deployment:
+    reasoning_client = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version=_reasoning_api_version,
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    )
+    REASONING_DEPLOYMENT = _reasoning_deployment
+    logger.info(f"[config] Reasoning model: {REASONING_DEPLOYMENT} (api_version={_reasoning_api_version})")
+else:
+    reasoning_client     = client
+    REASONING_DEPLOYMENT = DEPLOYMENT
+    logger.info(f"[config] No reasoning model configured — exploration will use {DEPLOYMENT}")
 
 # P1-2: shared LLM service. New code should prefer `llm.ask` / `llm.vision_heal`
 # over the legacy `ask_llm()` helper below. The legacy helper is preserved for
@@ -143,9 +162,13 @@ HEALING_DIR    = BASE / "healing_history"  # Track all healing attempts
 GOLDEN_DIR.mkdir(exist_ok=True)
 RUNS_DIR.mkdir(exist_ok=True)
 HEALING_DIR.mkdir(exist_ok=True)
+EXPLORATIONS_DIR    = BASE / "explorations"
+SELECTOR_MEMORY_FILE = BASE / "selector_memory.json"
+EXPLORATIONS_DIR.mkdir(exist_ok=True)
 
 # ── Synthesis tuning ─────────────────────────────────────────────────────────
-MAX_HEAL_ROUNDS   = 3    # Max Phase-1/2 retry cycles before giving up
+MAX_HEAL_ROUNDS    = 3    # Max Phase-1/2 retry cycles before giving up
+MAX_EXPLORE_RETRIES = 2   # Verify-then-act: retries per exploration step before giving up
 LLM_TEMPERATURE   = 0.2  # All LLM calls use a single determinism constant
 LLM_MAX_TOKENS    = 1500 # Default output token budget
 LLM_VISION_TOKENS = 2000 # Vision responses include full TS code — need more room
@@ -184,6 +207,15 @@ class TriggerCIRequest(BaseModel):
 
 class ValidateHealRequest(BaseModel):
     golden_id: str
+
+class ExploreRequest(BaseModel):
+    test_case: str
+    storage_state: Optional[str] = None   # e.g. "successfactors" → studio/.auth/successfactors.json
+    max_steps: int = 30
+
+class GenerateFromExplorationRequest(BaseModel):
+    exploration_id: str
+    md_content: str                        # possibly user-edited before generation
 # ── Azure OpenAI helper ───────────────────────────────────────────────────────
 # Legacy wrapper, now thin: delegates to LLMService + retry, and sanitises
 # error responses (P2-4) so we don't leak full Azure exception strings.
@@ -360,7 +392,7 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
                 ['node', str(validate_script), temp_file],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=180,   # 3 min — slow corporate sites (SuccessFactors etc.)
                 cwd=str(root_project)
             )
 
@@ -385,6 +417,16 @@ async def validate_test_locally(test_code: str, golden_id: str) -> dict:
                     except json.JSONDecodeError:
                         continue  # keep searching upward
             if parsed is not None:
+                # validate-test.js passes the screenshot as a file path to avoid
+                # bloating stdout with base64. Read it here and attach as base64.
+                shot_path = parsed.get("failureScreenshotPath")
+                if shot_path:
+                    try:
+                        with open(shot_path, "rb") as f:
+                            parsed["failureScreenshot"] = base64.b64encode(f.read()).decode("utf-8")
+                        logger.info(f"[validation] Failure screenshot loaded ({Path(shot_path).stat().st_size // 1024}KB): {shot_path}")
+                    except Exception as shot_err:
+                        logger.warning(f"[validation] Could not read failure screenshot: {shot_err}")
                 return parsed
             return {
                 "status": "ERROR",
@@ -433,6 +475,203 @@ def _clean_healed_code(code: str) -> str:
         else:
             break
     return code
+
+# ── Selector memory helpers ───────────────────────────────────────────────────
+# Every successful exploration step is recorded. Future explorations on the
+# same domain get the verified selector injected as a hint into the planning
+# prompt — the model uses evidence instead of guessing.
+
+def _load_selector_memory() -> dict:
+    if SELECTOR_MEMORY_FILE.exists():
+        try:
+            return json.loads(SELECTOR_MEMORY_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_selector_memory(memory: dict) -> None:
+    SELECTOR_MEMORY_FILE.write_text(json.dumps(memory, indent=2, default=str))
+
+def _intent_keywords(text: str) -> set:
+    """Extract meaningful keywords from a step description for fuzzy matching."""
+    stop = {
+        'the','a','an','and','or','to','from','in','on','at','by','for','with',
+        'into','of','is','are','was','be','as','their','this','that','it','its',
+        'if','then','based','path','please','use','using','should','must','will',
+        'can','click','go','navigate','open','find','select','check','get',
+    }
+    words = re.sub(r'[^a-z0-9\s]', '', text.lower()).split()
+    return {w for w in words if w not in stop and len(w) > 2}
+
+def _intent_similarity(a: str, b: str) -> float:
+    """Jaccard similarity between two step intents (0–1)."""
+    kw_a, kw_b = _intent_keywords(a), _intent_keywords(b)
+    if not kw_a or not kw_b:
+        return 0.0
+    return len(kw_a & kw_b) / len(kw_a | kw_b)
+
+def _find_memory_hints(domain: str, step_desc: str,
+                       min_similarity: float = 0.35) -> list:
+    """Return past verified selectors for similar steps on this domain, best first."""
+    memory = _load_selector_memory()
+    entries = memory.get(domain, {}).get("entries", [])
+    hits = []
+    for e in entries:
+        if e.get("success_count", 0) == 0:
+            continue
+        sim = _intent_similarity(step_desc, e.get("step_intent", ""))
+        if sim >= min_similarity:
+            hits.append({**e, "_similarity": sim})
+    hits.sort(key=lambda x: x["_similarity"] * x.get("success_count", 1), reverse=True)
+    return hits[:3]
+
+def _record_selector_outcome(domain: str, step_desc: str, action: str,
+                              selector: str, value: Optional[str],
+                              success: bool) -> None:
+    """Record the outcome of an exploration action to selector memory."""
+    if not selector or not domain or action in ("wait", "navigate", "read", "decision", "done"):
+        return
+    memory = _load_selector_memory()
+    if domain not in memory:
+        memory[domain] = {"entries": []}
+    entries = memory[domain]["entries"]
+
+    # Find an existing entry that matches this selector + similar intent
+    existing = next(
+        (e for e in entries
+         if e.get("selector") == selector
+         and _intent_similarity(e.get("step_intent", ""), step_desc) > 0.55),
+        None
+    )
+    now = datetime.now().strftime("%Y-%m-%d")
+    if existing:
+        if success:
+            existing["success_count"] = existing.get("success_count", 0) + 1
+            existing["last_success"]  = now
+            existing["failure_count"] = max(0, existing.get("failure_count", 0) - 1)
+        else:
+            existing["failure_count"] = existing.get("failure_count", 0) + 1
+            existing["last_failure"]  = now
+        sc, fc = existing["success_count"], existing.get("failure_count", 0)
+        existing["confidence"] = "high" if sc >= 3 and fc == 0 else (
+                                  "medium" if sc >= 1 and fc <= 1 else "low")
+    elif success:
+        entries.append({
+            "id":            str(uuid.uuid4())[:8],
+            "step_intent":   step_desc,
+            "action":        action,
+            "selector":      selector,
+            "value":         value,
+            "success_count": 1,
+            "failure_count": 0,
+            "confidence":    "medium",
+            "last_success":  now,
+            "last_failure":  None,
+        })
+    try:
+        _save_selector_memory(memory)
+    except Exception as me:
+        logger.warning(f"[memory] Could not save selector memory: {me}")
+
+
+# ── Exploration helpers ───────────────────────────────────────────────────────
+
+def _parse_test_steps(test_case: str) -> list:
+    """Use LLM to break a free-text description into a flat ordered step list."""
+    raw = ask_llm(
+        system="""You are a test planning assistant.
+Break the test description into a flat ordered list of atomic steps.
+For conditional paths (Path A / Path B / If X then Y) include ALL path steps tagged with their path label.
+Return ONLY a JSON array — no markdown fences, no explanation.
+Schema: [{"id":1,"description":"...","type":"navigate|interact|read|conditional|assert","path":"A|B|both"}]""",
+        user=test_case,
+        max_tokens=2000,
+    )
+    raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
+    return json.loads(raw)
+
+
+def _generate_exploration_md(exploration_id: str, test_case: str, steps_log: list) -> str:
+    """Produce a human-readable Markdown file from the exploration step log."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        f"# Test Exploration — {exploration_id}",
+        f"**Generated:** {now}",
+        "",
+        "## Original Test Description",
+        "",
+        test_case.strip(),
+        "",
+        "---",
+        "",
+        "## Verified Steps",
+        "",
+    ]
+
+    for entry in steps_log:
+        num    = entry.get("step_num", "?")
+        desc   = entry.get("description", "")
+        ok     = entry.get("success", False)
+        action = entry.get("action", "")
+        sel    = entry.get("selector", "")
+        val    = entry.get("value", "")
+        obs    = entry.get("observation", "")
+        notes  = entry.get("notes", "")
+        err    = entry.get("error", "")
+        path   = entry.get("path", "both")
+        readv  = entry.get("read_value", "")
+        shot   = entry.get("screenshot_file", "")
+
+        lines.append(f"### Step {num}: {desc}")
+        if path and path not in ("both", None):
+            lines.append(f"**Path:** {path}")
+        lines.append(f"**Status:** {'✅ Success' if ok else '❌ Failed'}")
+        if action:   lines.append(f"**Action:** `{action}`")
+        if sel:      lines.append(f"**Selector:** `{sel}`")
+        if val:      lines.append(f"**Value:** `{val}`")
+        if readv:    lines.append(f"**Read value:** `{readv}`")
+        if obs:      lines.append(f"**Observation:** {obs}")
+        if notes:    lines.append(f"**Notes:** {notes}")
+        if err:      lines.append(f"**Error:** {err}")
+        if shot:     lines.append(f"**Screenshot:** `screenshots/{shot}`")
+        lines.append("")
+
+    # Verified selector reference table
+    verified = [s for s in steps_log if s.get("selector") and s.get("success")]
+    if verified:
+        lines += [
+            "---", "",
+            "## Selector Reference",
+            "",
+            "| Step | Action | Selector | Value | Notes |",
+            "|------|--------|----------|-------|-------|",
+        ]
+        for s in verified:
+            sel_e = s.get("selector", "").replace("|", "\\|")
+            val_e = (s.get("value") or "").replace("|", "\\|")
+            lines.append(f"| {s['step_num']} | {s.get('action','')} | `{sel_e}` | {val_e} | {s.get('notes','')} |")
+        lines.append("")
+
+    # Path decisions
+    decisions = [s for s in steps_log if s.get("action") == "decision"]
+    if decisions:
+        lines += ["---", "", "## Conditional Path Decisions", ""]
+        for d in decisions:
+            lines.append(f"- Step {d['step_num']}: {d.get('observation','')} → **Path {d.get('path_taken','?')}**")
+        lines.append("")
+
+    lines += [
+        "---", "",
+        "## Instructions for Test Generation",
+        "",
+        "Use the **Selector Reference** table above to generate the Playwright TypeScript test.",
+        "- Add `test.use({ storageState: 'studio/.auth/<appName>.json' })` for authentication",
+        "- Follow verified steps in order; handle conditional paths as documented above",
+        "- Use exact selectors from the reference table — do not guess alternatives",
+        "",
+    ]
+    return "\n".join(lines)
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -733,6 +972,15 @@ AUTHENTICATION RULES (must follow — security requirement):
 - If the test instructions mention login but no storageState is available yet, add this comment inside the test:
     // TODO: run `npx ts-node scripts/auth.ts` to create the session file, then remove this line.
 - For apps that always start logged-in (no login step needed), omit the storageState line entirely.
+- NEVER use placeholder URLs like 'https://your-actual-domain.com' or 'https://example.com'.
+  Always use the exact URL from the test instructions. If no URL is given, use the real domain
+  name mentioned (e.g. 'SuccessFactors' → 'https://performancemanager.successfactors.com').
+
+TEST DATA RULES:
+- If the test needs candidate names, user IDs, or other test data, import from '../data/candidate.json'
+  using: const data = require('../data/candidate.json');
+- Never hardcode candidate names inline — always read from the data file.
+- The data file structure is: {{ "candidates": [{{ "id": "TC-001", "name": "..." }}] }}
 
 Include proper waits and error handling.
 Output ONLY the code, no markdown or explanations."""
@@ -801,6 +1049,15 @@ AUTHENTICATION RULES (must follow — security requirement):
 - NEVER hardcode usernames, passwords, or any credentials in the test code.
 - If the test requires a logged-in session, add: test.use({{ storageState: 'studio/.auth/<appName>.json' }});
 - For apps that start logged-in already, omit the storageState line entirely.
+- NEVER use placeholder URLs like 'https://your-actual-domain.com' or 'https://example.com'.
+  Use the exact URL from the instructions. If only an app name is given (e.g. 'SuccessFactors'),
+  use its real known domain (e.g. 'https://performancemanager.successfactors.com').
+
+TEST DATA RULES:
+- If the test needs candidate names, user IDs, or other test data, import from '../data/candidate.json'
+  using: const data = require('../data/candidate.json');
+- Never hardcode candidate names inline — always read from the data file.
+- The data file structure is: {{ "candidates": [{{ "id": "TC-001", "name": "..." }}] }}
 
 Include proper waits and error handling.
 Output ONLY the code, no markdown or explanations."""
@@ -1979,6 +2236,739 @@ async def get_workflow_status(golden_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Error fetching workflow status: {str(e)}")
+
+
+# ── Exploration endpoints ─────────────────────────────────────────────────────
+
+# ── Verify-then-act helpers ───────────────────────────────────────────────────
+
+def _gpt_vision_json(shot_b64: str, prompt: str) -> dict:
+    """Single GPT-4V call (main model) — used for verification / screenshot comparison."""
+    content = (
+        [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{shot_b64}"}},
+         {"type": "text", "text": prompt}]
+        if shot_b64 else prompt
+    )
+    raw = client.chat.completions.create(
+        model=DEPLOYMENT,
+        messages=[{"role": "user", "content": content}],
+        max_tokens=500,
+        temperature=0.1,
+    ).choices[0].message.content.strip()
+    raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
+    return json.loads(raw)
+
+
+def _reasoning_vision_json(shot_b64: str, prompt: str) -> dict:
+    """o4-mini call with vision — used for exploration planning and self-correction.
+
+    o4-mini rules:
+    - temperature must be omitted (reasoning models control sampling internally)
+    - max_completion_tokens replaces max_tokens
+    - vision (image_url) is supported
+    """
+    content = (
+        [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{shot_b64}"}},
+         {"type": "text", "text": prompt}]
+        if shot_b64 else prompt
+    )
+    kwargs: dict = {
+        "model":    REASONING_DEPLOYMENT,
+        "messages": [{"role": "user", "content": content}],
+    }
+    # o4-mini uses max_completion_tokens; standard models use max_tokens
+    if REASONING_DEPLOYMENT != DEPLOYMENT:
+        kwargs["max_completion_tokens"] = 2000
+    else:
+        kwargs["max_tokens"]  = 500
+        kwargs["temperature"] = 0.1
+
+    raw = reasoning_client.chat.completions.create(**kwargs).choices[0].message.content.strip()
+    raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
+    return json.loads(raw)
+
+
+def _plan_action_prompt(step_desc: str, step_type: str, current_url: str,
+                        history_ctx: str, memory_hints: Optional[list] = None) -> str:
+    hints_block = ""
+    if memory_hints:
+        hint_lines = []
+        for h in memory_hints:
+            conf  = h.get("confidence", "medium")
+            used  = h.get("success_count", 1)
+            sel   = h.get("selector", "")
+            act   = h.get("action", "")
+            val   = h.get("value")
+            val_s = f', value="{val}"' if val else ""
+            hint_lines.append(
+                f'  • [{conf} confidence, used {used}x] action="{act}", selector="{sel}"{val_s}'
+            )
+        hints_block = (
+            "\nPAST VERIFIED SELECTORS (from previous explorations on this site):\n"
+            + "\n".join(hint_lines)
+            + "\nTry these first — they worked before. Only deviate if the page looks different.\n"
+        )
+
+    return f"""You are controlling a real web browser to automate a test step.
+
+CURRENT STEP: {step_desc}
+STEP TYPE: {step_type}
+CURRENT URL: {current_url}
+
+RECENT ACTIONS:
+{history_ctx or "(none yet)"}
+{hints_block}
+Study the screenshot and decide the best single action to take right now.
+Think carefully: look at the actual element roles, aria-labels, and text visible on screen.
+Return ONLY a raw JSON object — no markdown:
+{{
+  "action": "click"|"fill"|"select_option"|"navigate"|"read"|"wait"|"hover"|"decision"|"done",
+  "selector": "CSS or Playwright locator — prefer aria-label, role, data-testid over classes",
+  "value": "text/URL/option to use — null for click/read/wait",
+  "observation": "what you see on screen relevant to this step (1-2 sentences)",
+  "confidence": "high"|"medium"|"low",
+  "notes": "anything important a test writer must know about this element",
+  "path_decision": null|"A"|"B"
+}}
+Rules:
+- Prefer: aria-label, getByRole, data-testid, text= locators
+- Avoid: long CSS class chains, positional selectors
+- For conditional/read steps: action="decision", set path_decision
+- If step already done: action="done"
+- For navigation: action="navigate", value=full URL"""
+
+
+def _verify_prompt(step_desc: str, action: str, selector: str, value: str) -> str:
+    return f"""You are verifying whether a browser action succeeded.
+
+STEP THAT WAS ATTEMPTED: {step_desc}
+ACTION EXECUTED: {action} on "{selector}" {f'with value "{value}"' if value else ''}
+
+You have two screenshots: BEFORE (left/first) and AFTER (right/second) the action.
+Compare them carefully and determine if the action had the intended effect.
+
+Return ONLY a raw JSON object — no markdown:
+{{
+  "success": true|false,
+  "observation": "what changed between the two screenshots (or what stayed the same)",
+  "correction_hint": "if failed: specific reason why + what to try instead (different selector, different action type, need to scroll first, element is inside iframe, etc.)"
+}}
+
+Be strict: success=true only if there is clear visual evidence the action worked
+(e.g. a menu opened, a field was filled, a page changed, a value was read)."""
+
+
+def _correction_prompt(step_desc: str, action_plan: dict, failure_reason: str,
+                        current_url: str, history_ctx: str) -> str:
+    return f"""A browser action just failed. Reason: {failure_reason}
+
+ORIGINAL STEP: {step_desc}
+FAILED ACTION: {action_plan.get('action')} on selector "{action_plan.get('selector')}"
+CURRENT URL: {current_url}
+
+RECENT ACTIONS:
+{history_ctx or "(none yet)"}
+
+Look at the screenshot (current page state after the failed attempt).
+Reason carefully about why the action failed and suggest a corrected action.
+
+Return ONLY a raw JSON object — no markdown:
+{{
+  "action": "click"|"fill"|"select_option"|"navigate"|"read"|"wait"|"hover"|"decision"|"done",
+  "selector": "corrected selector based on what you now see",
+  "value": "corrected value if needed — null otherwise",
+  "observation": "what you see now and why the original failed",
+  "confidence": "high"|"medium"|"low",
+  "notes": "what was wrong and what you changed",
+  "path_decision": null|"A"|"B",
+  "reasoning": "step-by-step reasoning about why the original failed and why this correction should work"
+}}"""
+
+
+async def _execute_exploration_action(page, action: str, selector: str,
+                                       value: Optional[str]) -> Optional[str]:
+    """Execute one action on the page. Returns read text for 'read' actions."""
+    if action == "navigate":
+        nav_url = value or selector
+        for _w, _t in [('domcontentloaded', 60_000), ('load', 60_000), ('commit', 90_000)]:
+            try:
+                await page.goto(nav_url, wait_until=_w, timeout=_t)
+                break
+            except Exception:
+                pass
+        await page.wait_for_timeout(NAV_PAUSE_MS)
+
+    elif action == "wait":
+        await page.wait_for_timeout(int(value or 2000))
+
+    elif action == "read":
+        if selector:
+            return await page.locator(selector).first.text_content(timeout=15_000)
+
+    elif action == "hover":
+        await page.locator(selector).first.hover(timeout=10_000)
+        await page.wait_for_timeout(500)
+
+    elif action == "click":
+        await page.locator(selector).first.click(timeout=20_000)
+        await page.wait_for_timeout(1500)
+
+    elif action == "fill":
+        await page.locator(selector).first.fill(value or "", timeout=15_000)
+
+    elif action == "select_option":
+        loc = page.locator(selector).first
+        if value:
+            await loc.select_option(value, timeout=15_000)
+        else:
+            opts = await loc.locator("option").all()
+            if opts:
+                first_val = await opts[0].get_attribute("value") or ""
+                await loc.select_option(first_val, timeout=15_000)
+
+    return None
+
+
+@app.post("/api/explore")
+async def explore_test_case(req: ExploreRequest):
+    """
+    Stage 1 — Browser Exploration.
+    Launches a real Playwright browser (with storageState for auth), drives it
+    step-by-step using GPT-4V vision, records verified selectors, and produces
+    a Markdown file that can be used as the backbone for test generation.
+    """
+    exploration_id = str(uuid.uuid4())[:8]
+    expl_dir  = EXPLORATIONS_DIR / exploration_id
+    shots_dir = expl_dir / "screenshots"
+    expl_dir.mkdir(parents=True, exist_ok=True)
+    shots_dir.mkdir(exist_ok=True)
+
+    steps_log  = []
+    pb         = None
+    browser    = None
+    path_taken = None   # "A" or "B" once a conditional decision is made
+
+    try:
+        logger.info(f"[EXPLORE {exploration_id}] Starting — {req.test_case[:80]}...")
+
+        # ── E0-pre: Inject candidate data from data/candidate.json ────────
+        # If the test description mentions "candidate" or "JSON file" but has no
+        # actual name, auto-inject the first candidate's name so the LLM knows
+        # exactly what to type into the search box.
+        enriched_test_case = req.test_case
+        data_file = BASE.parent / "data" / "candidate.json"
+        candidate_context = ""
+        if data_file.exists():
+            try:
+                candidate_data = json.loads(data_file.read_text())
+                candidates = candidate_data.get("candidates", [])
+                if candidates:
+                    names = [c.get("name", "") for c in candidates if c.get("name")]
+                    candidate_context = (
+                        f"\n\n[TEST DATA from data/candidate.json]\n"
+                        f"Candidate(s) to use: {', '.join(names)}\n"
+                        f"When the description says 'search for candidate by name', "
+                        f"use the first candidate: {names[0]}\n"
+                        f"Full list: {json.dumps(candidates)}"
+                    )
+                    enriched_test_case = req.test_case + candidate_context
+                    logger.info(f"[EXPLORE {exploration_id}] Injected candidate data: {names}")
+            except Exception as de:
+                logger.warning(f"[EXPLORE {exploration_id}] Could not load candidate.json: {de}")
+
+        # ── E0: Parse description into atomic steps ────────────────────────
+        logger.info(f"[EXPLORE {exploration_id}] Parsing test steps with LLM...")
+        try:
+            steps = _parse_test_steps(enriched_test_case)
+            logger.info(f"[EXPLORE {exploration_id}] {len(steps)} steps parsed")
+        except Exception as pe:
+            logger.error(f"[EXPLORE {exploration_id}] Step parsing failed: {pe}")
+            return {"error": f"Could not parse test steps: {pe}", "explorationId": exploration_id, "steps": []}
+
+        # ── E1: Launch browser ─────────────────────────────────────────────
+        pb      = await async_playwright().start()
+        browser = await pb.chromium.launch(headless=False)
+
+        ctx_kwargs: dict = {}
+        if req.storage_state:
+            auth_path = BASE / ".auth" / f"{req.storage_state}.json"
+            if auth_path.exists():
+                ctx_kwargs["storage_state"] = str(auth_path)
+                logger.info(f"[EXPLORE {exploration_id}] Using storageState: {auth_path.name}")
+            else:
+                logger.warning(f"[EXPLORE {exploration_id}] storageState not found: {auth_path} — continuing without auth")
+
+        ctx  = await browser.new_context(**ctx_kwargs)
+        page = await ctx.new_page()
+
+        # Navigate to start URL extracted from the test description
+        url_match = re.search(r'https?://[^\s]+', req.test_case)
+        if url_match:
+            start_url = url_match.group(0).rstrip('.,)')
+            logger.info(f"[EXPLORE {exploration_id}] Navigating to {start_url}")
+            for _w, _t in [('domcontentloaded', 60_000), ('load', 60_000), ('commit', 90_000)]:
+                try:
+                    await page.goto(start_url, wait_until=_w, timeout=_t)
+                    logger.info(f"[EXPLORE {exploration_id}] Page loaded (wait_until='{_w}')")
+                    break
+                except Exception:
+                    pass
+            await page.wait_for_timeout(NAV_PAUSE_MS)
+
+        # ── E2: Verify-then-act exploration loop ──────────────────────────────
+        # For each step:
+        #   1. Screenshot BEFORE
+        #   2. GPT-4V plans the action (with chain-of-thought reasoning)
+        #   3. Execute the action on the real browser
+        #   4. Screenshot AFTER
+        #   5. GPT-4V verifies: did it work? (compares before/after)
+        #   6. If verification fails → GPT reasons about why → corrected action → retry
+        #   Up to MAX_EXPLORE_RETRIES retries per step before moving on.
+        step_counter = 0
+        for step in steps[:req.max_steps]:
+            step_id   = step.get("id", step_counter + 1)
+            step_desc = step.get("description", "")
+            step_type = step.get("type", "interact")
+            step_path = step.get("path", "both")
+
+            if path_taken and step_path not in ("both", path_taken):
+                logger.info(f"[EXPLORE {exploration_id}] Skipping step {step_id} (path={step_path}, chose={path_taken})")
+                continue
+
+            step_counter += 1
+            logger.info(f"[EXPLORE {exploration_id}] Step {step_counter}: {step_desc[:60]}")
+
+            # ── Before screenshot ──────────────────────────────────────────
+            before_b64  = ""
+            before_file = f"step-{step_counter:03d}-before.png"
+            try:
+                before_bytes = await page.screenshot(full_page=False)
+                before_b64   = base64.b64encode(before_bytes).decode()
+                (shots_dir / before_file).write_bytes(before_bytes)
+            except Exception as se:
+                logger.warning(f"[EXPLORE {exploration_id}] Before-screenshot failed: {se}")
+
+            history_ctx = "\n".join([
+                f"Step {h['step_num']}: [{h.get('action','')}] {h.get('selector','')} — {h.get('observation','')}"
+                for h in steps_log[-4:]
+            ])
+
+            # ── Memory lookup — inject hints from past successful explorations ─
+            current_domain = re.sub(r'https?://', '', page.url).split('/')[0]
+            memory_hints   = _find_memory_hints(current_domain, step_desc)
+            if memory_hints:
+                logger.info(
+                    f"[EXPLORE {exploration_id}] Memory: {len(memory_hints)} hint(s) for step {step_counter} "
+                    f"— top: \"{memory_hints[0].get('selector','')}\" ({memory_hints[0].get('confidence','')})"
+                )
+
+            log_entry = {
+                "step_num":        step_counter,
+                "description":     step_desc,
+                "action":          "",
+                "selector":        "",
+                "value":           None,
+                "observation":     "",
+                "notes":           "",
+                "confidence":      "low",
+                "path":            step_path,
+                "path_taken":      path_taken,
+                "screenshot_file": before_file,
+                "success":         False,
+                "error":           None,
+                "memory_hints_used": len(memory_hints),
+                "read_value":      None,
+                "attempts":        0,
+            }
+
+            last_failure  = ""
+            action_plan   = {}
+            current_b64   = before_b64   # updated after each attempt
+            url_before_step = page.url    # for stuck-detection on navigation steps
+
+            # ── Retry loop ─────────────────────────────────────────────────
+            for attempt in range(MAX_EXPLORE_RETRIES + 1):
+                log_entry["attempts"] = attempt + 1
+
+                # ── Plan (or re-plan with reasoning on retry) ──────────────
+                try:
+                    if attempt == 0:
+                        prompt = _plan_action_prompt(step_desc, step_type, page.url,
+                                                     history_ctx, memory_hints)
+                    else:
+                        logger.info(f"[EXPLORE {exploration_id}] Retry {attempt}/{MAX_EXPLORE_RETRIES}: {last_failure[:60]}")
+                        prompt = _correction_prompt(step_desc, action_plan, last_failure, page.url, history_ctx)
+
+                    action_plan = _reasoning_vision_json(current_b64, prompt)
+                except Exception as pe:
+                    logger.error(f"[EXPLORE {exploration_id}] Planning failed: {pe}")
+                    log_entry["error"] = f"Planning error: {pe}"
+                    break
+
+                action   = action_plan.get("action", "done")
+                selector = action_plan.get("selector", "")
+                value    = action_plan.get("value")
+                pdec     = action_plan.get("path_decision")
+
+                log_entry.update({
+                    "action":     action,
+                    "selector":   selector,
+                    "value":      value,
+                    "observation": action_plan.get("observation", ""),
+                    "notes":      action_plan.get("notes", ""),
+                    "confidence": action_plan.get("confidence", "medium"),
+                })
+
+                if pdec and path_taken is None:
+                    path_taken = pdec
+                    log_entry["path_taken"] = path_taken
+                    logger.info(f"[EXPLORE {exploration_id}] Path decision → {path_taken}")
+
+                # FIX 1: "done" is NOT auto-success — verify the goal was achieved.
+                # The model uses "done" as an escape hatch when it can't find elements.
+                # We verify with a goal-check before accepting it.
+                if action == "decision":
+                    log_entry["success"] = True
+                    logger.info(f"[EXPLORE {exploration_id}] ✅ Step {step_counter}: path decision")
+                    break
+
+                if action == "done":
+                    # Ask GPT-4V: was the actual goal of this step achieved?
+                    goal_check_prompt = f"""The model says this step is already done: "{step_desc}"
+Look at the screenshot carefully.
+Is there clear visual evidence that this goal HAS actually been accomplished on this page?
+Return ONLY raw JSON: {{"achieved": true|false, "reason": "what you see that confirms or denies it"}}"""
+                    try:
+                        goal_resp = _reasoning_vision_json(current_b64, goal_check_prompt)
+                        if goal_resp.get("achieved", False):
+                            log_entry["success"] = True
+                            log_entry["observation"] = goal_resp.get("reason", "")
+                            logger.info(f"[EXPLORE {exploration_id}] ✅ Step {step_counter}: goal confirmed done")
+                            break
+                        else:
+                            # Goal NOT achieved — treat as failure and retry
+                            last_failure = (
+                                f"Model said 'done' but goal was not achieved: "
+                                f"{goal_resp.get('reason', 'Goal not visible on page')}. "
+                                f"You MUST find and interact with an element to accomplish this step."
+                            )
+                            logger.warning(f"[EXPLORE {exploration_id}] 'done' rejected — {last_failure[:80]}")
+                            if attempt >= MAX_EXPLORE_RETRIES:
+                                log_entry["error"] = last_failure
+                            continue
+                    except Exception:
+                        # If goal-check fails to parse, give benefit of the doubt
+                        log_entry["success"] = True
+                        break
+
+                # ── Execute ────────────────────────────────────────────────
+                exec_error = None
+                read_val   = None
+                try:
+                    read_val = await _execute_exploration_action(page, action, selector, value)
+                    if read_val is not None:
+                        log_entry["read_value"] = read_val
+                        logger.info(f"[EXPLORE {exploration_id}] Read: '{read_val}'")
+                except Exception as ae:
+                    exec_error = str(ae)[:300]
+                    logger.warning(f"[EXPLORE {exploration_id}] Exec error attempt {attempt+1}: {ae}")
+
+                # ── After screenshot ───────────────────────────────────────
+                after_b64   = ""
+                after_file  = f"step-{step_counter:03d}-after-a{attempt+1}.png"
+                try:
+                    after_bytes = await page.screenshot(full_page=False)
+                    after_b64   = base64.b64encode(after_bytes).decode()
+                    (shots_dir / after_file).write_bytes(after_bytes)
+                except Exception:
+                    pass
+
+                # ── Verify ─────────────────────────────────────────────────
+                url_after = page.url
+                if exec_error:
+                    last_failure = (
+                        f"Playwright raised an error executing {action} on '{selector}': "
+                        f"{exec_error}. The selector may not exist, be hidden, or need scrolling."
+                    )
+                    verification_ok = False
+
+                elif action == "wait":
+                    verification_ok = True
+
+                elif action in ("navigate", "read"):
+                    # FIX 2: For navigation steps, verify the URL actually changed
+                    if action == "navigate" and step_type in ("navigate",) and url_after == url_before_step:
+                        last_failure = (
+                            f"Navigation action executed but URL did not change "
+                            f"(still {url_after}). The page may not have responded to the action."
+                        )
+                        verification_ok = False
+                    else:
+                        verification_ok = True
+
+                else:
+                    # FIX 3: Goal-based verification — did the STEP GOAL get achieved?
+                    try:
+                        v_prompt = f"""You are verifying whether a browser step succeeded.
+
+STEP GOAL: {step_desc}
+ACTION TAKEN: {action} on "{selector}" {f'with value "{value}"' if value else ''}
+URL BEFORE: {url_before_step}
+URL AFTER: {url_after}
+
+You have BEFORE (first image) and AFTER (second image) screenshots.
+Judge whether the GOAL of the step was achieved — not just whether something changed.
+
+Return ONLY raw JSON:
+{{
+  "success": true|false,
+  "observation": "what changed and whether the goal was met",
+  "correction_hint": "if failed: exactly what went wrong and what to try instead (different selector, scroll first, element inside iframe, need to wait longer, etc.)"
+}}
+Be strict: success=true only if there is clear visual evidence the step GOAL was accomplished."""
+
+                        v_content = [
+                            {"type": "text", "text": "BEFORE:"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_b64}"}},
+                            {"type": "text", "text": "AFTER:"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{after_b64}"}},
+                            {"type": "text", "text": v_prompt},
+                        ]
+                        v_kwargs: dict = {
+                            "model":    REASONING_DEPLOYMENT,
+                            "messages": [{"role": "user", "content": v_content}],
+                        }
+                        if REASONING_DEPLOYMENT != DEPLOYMENT:
+                            v_kwargs["max_completion_tokens"] = 800
+                        else:
+                            v_kwargs["max_tokens"]  = 300
+                            v_kwargs["temperature"] = 0.1
+                        v_raw = reasoning_client.chat.completions.create(
+                            **v_kwargs
+                        ).choices[0].message.content.strip()
+                        v_raw = re.sub(r"```(?:json)?[\n]?", "", v_raw).strip().rstrip("`").strip()
+                        verification = json.loads(v_raw)
+                        verification_ok = verification.get("success", False)
+                        log_entry["observation"] = verification.get("observation", log_entry["observation"])
+                        if not verification_ok:
+                            last_failure = verification.get("correction_hint", "Action had no visible effect on goal")
+                    except Exception as ve:
+                        logger.warning(f"[EXPLORE {exploration_id}] Verification parse error: {ve}")
+                        verification_ok = True  # give benefit of the doubt on parse failure
+
+                if verification_ok:
+                    log_entry["success"]         = True
+                    log_entry["screenshot_file"] = after_file
+                    logger.info(
+                        f"[EXPLORE {exploration_id}] ✅ Step {step_counter} "
+                        f"(attempt {attempt+1}): {action} {selector[:40] if selector else ''}"
+                    )
+                    # ── Record success to selector memory ─────────────────
+                    _record_selector_outcome(
+                        current_domain, step_desc, action, selector, value, success=True
+                    )
+                    break
+
+                # ── Record failed selector attempt ─────────────────────────
+                _record_selector_outcome(
+                    current_domain, step_desc, action, selector, value, success=False
+                )
+
+                # Verification failed — prepare for next retry
+                current_b64 = after_b64 or current_b64
+                if attempt >= MAX_EXPLORE_RETRIES:
+                    log_entry["error"] = f"Failed after {MAX_EXPLORE_RETRIES+1} attempts: {last_failure}"
+                    logger.warning(
+                        f"[EXPLORE {exploration_id}] ❌ Step {step_counter} exhausted retries: {last_failure[:80]}"
+                    )
+
+            steps_log.append(log_entry)
+            await page.wait_for_timeout(800)
+
+        # ── E3: Generate MD and persist ────────────────────────────────────
+        md_content = _generate_exploration_md(exploration_id, enriched_test_case, steps_log)
+        (expl_dir / "exploration.md").write_text(md_content)
+        (expl_dir / "steps.json").write_text(json.dumps({
+            "explorationId": exploration_id,
+            "testCase":      req.test_case,
+            "storageState":  req.storage_state,
+            "pathTaken":     path_taken,
+            "stepsCompleted": step_counter,
+            "steps":         steps_log,
+        }, indent=2, default=str))
+
+        logger.info(f"[EXPLORE {exploration_id}] ✅ Done — {step_counter} steps, MD saved")
+
+        await ctx.close()
+        await browser.close()
+        await pb.stop()
+
+        return {
+            "explorationId":   exploration_id,
+            "stepsCompleted":  step_counter,
+            "pathTaken":       path_taken,
+            "steps":           steps_log,
+            "markdownContent": md_content,
+            "status":          "complete",
+        }
+
+    except Exception as e:
+        logger.error(f"[EXPLORE {exploration_id}] Fatal: {e}")
+        for resource in [browser, pb]:
+            if resource:
+                try: await resource.close()
+                except: pass
+        md_content = _generate_exploration_md(exploration_id, enriched_test_case, steps_log) if steps_log else "# Exploration failed\n"
+        try: (expl_dir / "exploration.md").write_text(md_content)
+        except: pass
+        return {
+            "explorationId":   exploration_id,
+            "stepsCompleted":  len(steps_log),
+            "pathTaken":       path_taken,
+            "steps":           steps_log,
+            "markdownContent": md_content,
+            "status":          "error",
+            "error":           str(e),
+        }
+
+
+@app.post("/api/generate-from-exploration")
+async def generate_from_exploration(req: GenerateFromExplorationRequest):
+    """
+    Stage 3 — Generate Playwright TypeScript from an exploration MD.
+    Uses the verified selectors discovered during exploration.
+    """
+    expl_dir   = EXPLORATIONS_DIR / req.exploration_id
+    steps_file = expl_dir / "steps.json"
+
+    original_tc    = ""
+    storage_state  = ""
+    first_shot_b64 = ""
+
+    if steps_file.exists():
+        data          = json.loads(steps_file.read_text())
+        original_tc   = data.get("testCase", "")
+        storage_state = data.get("storageState", "") or ""
+
+    shots_dir = expl_dir / "screenshots"
+    if shots_dir.exists():
+        shots = sorted(shots_dir.glob("*.png"))
+        if shots:
+            first_shot_b64 = base64.b64encode(shots[0].read_bytes()).decode()
+
+    prompt = f"""Generate a complete, production-ready Playwright TypeScript test from the exploration document below.
+
+EXPLORATION DOCUMENT (contains selectors verified on the real browser):
+{req.md_content}
+
+ORIGINAL TEST DESCRIPTION:
+{original_tc}
+
+REQUIREMENTS:
+1. Use ONLY selectors from the Selector Reference table — do not invent alternatives
+2. Handle both conditional paths (Path A / Path B) with real if/else logic reading the live page state
+3. Add `await page.waitForTimeout(1500)` after every click that opens a new panel or menu
+4. For date arithmetic (e.g. 30 days after start date): read the start date, parse it as a JS Date, add 30 days, write end date
+5. Add `test.use({{ storageState: 'studio/.auth/{storage_state or "successfactors"}.json' }})` before the test block
+6. Never use placeholder URLs — use the exact URL from the exploration document
+7. Never hardcode credentials
+8. Wrap each major section in a descriptive `await test.step('...', async () => {{ ... }})` block
+
+Output ONLY the TypeScript code. No markdown fences."""
+
+    try:
+        content = (
+            [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{first_shot_b64}"}},
+             {"type": "text", "text": prompt}]
+            if first_shot_b64 else prompt
+        )
+        response = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=3000,
+            temperature=0.1,
+        )
+        code = _clean_healed_code(response.choices[0].message.content.strip())
+        return {"explorationId": req.exploration_id, "generatedCode": code, "status": "success"}
+
+    except Exception as e:
+        logger.error(f"[GENERATE-FROM-EXPLORATION] {e}")
+        return {"error": str(e), "explorationId": req.exploration_id}
+
+
+@app.get("/api/explorations")
+async def list_explorations():
+    """List all saved explorations, newest first."""
+    result = []
+    for d in sorted(EXPLORATIONS_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not d.is_dir(): continue
+        sf = d / "steps.json"
+        if sf.exists():
+            try:
+                data = json.loads(sf.read_text())
+                result.append({
+                    "id":           d.name,
+                    "testCase":     data.get("testCase", "")[:120],
+                    "stepsCount":   data.get("stepsCompleted", len(data.get("steps", []))),
+                    "pathTaken":    data.get("pathTaken"),
+                    "storageState": data.get("storageState"),
+                    "hasScreenshots": (d / "screenshots").exists(),
+                })
+            except Exception:
+                result.append({"id": d.name, "testCase": "Unknown", "stepsCount": 0})
+    return result
+
+
+@app.get("/api/explorations/{exploration_id}")
+async def get_exploration(exploration_id: str):
+    """Return a saved exploration (steps + MD content)."""
+    expl_dir = EXPLORATIONS_DIR / exploration_id
+    if not expl_dir.exists():
+        raise HTTPException(status_code=404, detail="Exploration not found")
+    result: dict = {"explorationId": exploration_id}
+    sf = expl_dir / "steps.json"
+    if sf.exists():
+        result.update(json.loads(sf.read_text()))
+    mf = expl_dir / "exploration.md"
+    if mf.exists():
+        result["markdownContent"] = mf.read_text()
+    return result
+
+
+# ── Selector memory endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/selector-memory")
+async def get_selector_memory():
+    """Return selector memory stats — domains, entry counts, confidence breakdown."""
+    memory = _load_selector_memory()
+    result = []
+    for domain, data in memory.items():
+        entries = data.get("entries", [])
+        result.append({
+            "domain":   domain,
+            "total":    len(entries),
+            "high":     sum(1 for e in entries if e.get("confidence") == "high"),
+            "medium":   sum(1 for e in entries if e.get("confidence") == "medium"),
+            "low":      sum(1 for e in entries if e.get("confidence") == "low"),
+            "entries":  entries,
+        })
+    return result
+
+@app.delete("/api/selector-memory/{domain}")
+async def clear_selector_memory(domain: str):
+    """Clear all learned selectors for a specific domain."""
+    memory = _load_selector_memory()
+    if domain in memory:
+        del memory[domain]
+        _save_selector_memory(memory)
+        return {"cleared": domain}
+    raise HTTPException(status_code=404, detail=f"No memory found for domain: {domain}")
+
+@app.delete("/api/selector-memory")
+async def clear_all_selector_memory():
+    """Clear all selector memory."""
+    _save_selector_memory({})
+    return {"cleared": "all"}
 
 
 # ─ Health check endpoints ──────────────────────────────────────────────────────

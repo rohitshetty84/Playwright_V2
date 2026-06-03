@@ -153,18 +153,14 @@ try {
         timestamp: new Date().toISOString()
       };
 
-      // Attach the failure screenshot so Phase 2 healing sees the exact page
-      // state at the moment of failure — not a fresh re-navigation to the start URL.
+      // Pass the failure screenshot PATH (not base64) so Phase 2 can read it.
+      // Embedding base64 in stdout creates a 500KB+ JSON line that breaks parsing.
       if (!passed) {
         const testResultsDir = path.join(projectRoot, 'test-results');
         const screenshotPath = findFailureScreenshot(testResultsDir, startTime);
         if (screenshotPath) {
-          try {
-            result.failureScreenshot = fs.readFileSync(screenshotPath).toString('base64');
-            console.log(`[validate] Failure screenshot attached (${Math.round(result.failureScreenshot.length * 0.75 / 1024)}KB): ${screenshotPath}`);
-          } catch (e) {
-            console.log(`[validate] Warning: could not read screenshot: ${e.message}`);
-          }
+          result.failureScreenshotPath = screenshotPath;
+          console.log(`[validate] Failure screenshot found (${Math.round(fs.statSync(screenshotPath).size / 1024)}KB): ${screenshotPath}`);
         } else {
           console.log('[validate] No failure screenshot found in test-results/');
         }

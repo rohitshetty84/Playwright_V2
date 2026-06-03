@@ -7,12 +7,14 @@
     "test": "playwright test",
     "test:ci": "playwright test --reporter=list,html,json,junit",
     "test:headed": "playwright test --headed",
-    "report": "playwright show-report"
+    "report": "playwright show-report",
+    "auth": "ts-node scripts/auth.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.48.0",
     "@types/node": "^20.11.0",
     "dotenv": "^16.4.5",
+    "ts-node": "^10.9.2",
     "typescript": "^5.4.0"
   }
 }

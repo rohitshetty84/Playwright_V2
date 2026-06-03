@@ -463,6 +463,9 @@
         <span class="icon">🔧</span> Auto-Heal
         <span class="nav-badge alert" id="nav-fail-count" style="display:none"></span>
       </div>
+      <div class="nav-item" data-tab="explore">
+        <span class="icon">🔍</span> Explore
+      </div>
     </nav>
 
     <!-- Main content -->
@@ -611,6 +614,109 @@
         </div>
       </div>
 
+      <!-- ══════════════════════════ EXPLORE ══════════════════════════ -->
+      <div class="pane" id="pane-explore">
+
+        <div class="card">
+          <div class="card-title">🔍 Browser Explorer
+            <span style="font-size:11px;color:var(--text2);font-weight:400;margin-left:6px">
+              Drives a real browser step-by-step · verifies each action · produces a selector-verified MD
+            </span>
+          </div>
+
+          <div id="explore-form" class="col">
+            <div>
+              <label>Test Case Description *</label>
+              <textarea id="explore-tc" rows="6"
+                placeholder="Describe every step including conditional paths (Path A / Path B). Include the full URL to start from.&#10;&#10;Example:&#10;1. Navigate to https://... and go to Onboarding Dashboard&#10;2. Search for candidate by name&#10;3. If Data Collection = Completed → Path A: ...&#10;   If not completed → Path B: ..."></textarea>
+            </div>
+            <div style="display:flex;gap:12px">
+              <div style="flex:1">
+                <label>Auth Session (storageState name)</label>
+                <input id="explore-auth" placeholder="successfactors" value="successfactors"
+                  title="Filename stem in studio/.auth/ — e.g. 'successfactors' → studio/.auth/successfactors.json" />
+              </div>
+              <div style="width:120px">
+                <label>Max Steps</label>
+                <input id="explore-max-steps" type="number" value="25" min="5" max="50" />
+              </div>
+            </div>
+            <div id="explore-error" class="cand-error" style="display:none"></div>
+            <div class="row">
+              <button class="btn btn-primary" onclick="runExplore()">🔍 Start Exploration</button>
+            </div>
+          </div>
+
+          <!-- Exploration progress -->
+          <div id="explore-progress" style="display:none" class="col mt-12">
+            <div class="progress-wrap"><div class="progress-bar" id="explore-prog-bar" style="width:5%;background:linear-gradient(90deg,#7c3aed,#a78bfa)"></div></div>
+            <div id="explore-prog-label" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#a78bfa">Exploring…</div>
+          </div>
+        </div>
+
+        <!-- Step log — shown during / after exploration -->
+        <div id="explore-steps-card" class="card" style="display:none">
+          <div class="card-title">📋 Exploration Steps
+            <span id="explore-path-badge" style="display:none;margin-left:8px;font-size:11px;padding:2px 8px;border-radius:10px;background:#4f46e5;color:#fff"></span>
+          </div>
+          <div id="explore-step-list" style="font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.8"></div>
+        </div>
+
+        <!-- MD output — editable before generating test -->
+        <div id="explore-md-card" class="card" style="display:none">
+          <div class="card-title">📄 Exploration Document
+            <span style="font-size:11px;color:var(--text2);font-weight:400;margin-left:6px">Review and edit before generating the test script</span>
+          </div>
+          <textarea id="explore-md-editor" rows="20"
+            style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text1);resize:vertical"></textarea>
+          <div class="row mt-12">
+            <button class="btn btn-primary" onclick="generateFromExploration()">⚡ Generate Test Script</button>
+            <button class="btn btn-ghost btn-sm" onclick="copyCode('explore-md-editor')">Copy MD</button>
+          </div>
+        </div>
+
+        <!-- Generated test code -->
+        <div id="explore-code-card" class="card" style="display:none">
+          <div class="card-title">Generated Test Script</div>
+          <div class="code-wrap">
+            <div class="code-header">
+              <span class="code-lang">typescript</span>
+              <button class="code-copy" onclick="copyCode('explore-code-pre')">copy</button>
+            </div>
+            <div class="code-body"><pre id="explore-code-pre"></pre></div>
+          </div>
+          <div class="row mt-12">
+            <input id="explore-golden-name" placeholder="onboarding-path-a.spec.ts" style="flex:1" />
+            <button class="btn btn-success" onclick="saveExploreGolden()">⬆ Save as Golden</button>
+            <button class="btn btn-ghost btn-sm" onclick="resetExplore()">✕ Reset</button>
+          </div>
+        </div>
+
+        <!-- Selector Memory -->
+        <div class="card" style="margin-top:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <div class="card-title" style="margin:0">🧠 Selector Memory
+              <span style="font-size:11px;color:var(--text2);font-weight:400;margin-left:6px">Verified selectors reused across runs</span>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-ghost btn-sm" onclick="loadSelectorMemory()">↺ Refresh</button>
+              <button class="btn btn-ghost btn-sm" style="color:#f87171" onclick="clearAllMemory()">✕ Clear all</button>
+            </div>
+          </div>
+          <div id="selector-memory-list" style="font-size:12px;color:var(--text2)">Loading…</div>
+        </div>
+
+        <!-- Past explorations -->
+        <div class="card" style="margin-top:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <div class="card-title" style="margin:0">Past Explorations</div>
+            <button class="btn btn-ghost btn-sm" onclick="loadExplorations()">↺ Refresh</button>
+          </div>
+          <div id="explore-history-list" style="font-size:12px;color:var(--text2)">Loading…</div>
+        </div>
+
+      </div><!-- /pane-explore -->
+
     </main>
   </div>
 </div>
@@ -619,7 +725,8 @@
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
-let STATE = { goldens: [], runs: [], synthCode: '', synthAnalysis: {}, healGoldenId: '', healCode: '' };
+let STATE = { goldens: [], runs: [], synthCode: '', synthAnalysis: {}, healGoldenId: '', healCode: '',
+              exploreId: '', exploreMd: '', exploreCode: '' };
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 async function boot() {
@@ -1286,6 +1393,280 @@ async function syncGoldensToGitHub() {
 }
 
 boot();
+
+// ── Explore ────────────────────────────────────────────────────────────────
+
+async function runExplore() {
+  const tc      = document.getElementById('explore-tc').value.trim();
+  const auth    = document.getElementById('explore-auth').value.trim() || null;
+  const maxSteps = parseInt(document.getElementById('explore-max-steps').value) || 25;
+  const errEl   = document.getElementById('explore-error');
+
+  errEl.style.display = 'none';
+  if (!tc) { errEl.textContent = 'Test description is required.'; errEl.style.display = 'block'; return; }
+
+  // Reset cards
+  ['explore-steps-card','explore-md-card','explore-code-card'].forEach(id =>
+    document.getElementById(id).style.display = 'none');
+  document.getElementById('explore-step-list').innerHTML = '';
+
+  // Show progress
+  document.getElementById('explore-form').style.display = 'none';
+  const prog = document.getElementById('explore-progress');
+  prog.style.display = 'block';
+  setProgress('explore-prog-bar', null, 10);
+  document.getElementById('explore-prog-label').textContent = 'Parsing test steps…';
+
+  try {
+    setProgress('explore-prog-bar', null, 20);
+    document.getElementById('explore-prog-label').textContent = 'Launching browser and exploring…';
+
+    const res = await api('POST', '/explore', { test_case: tc, storage_state: auth, max_steps: maxSteps });
+
+    STATE.exploreId = res.explorationId;
+    STATE.exploreMd = res.markdownContent || '';
+
+    setProgress('explore-prog-bar', null, 90);
+    document.getElementById('explore-prog-label').textContent = `✅ Exploration complete — ${res.stepsCompleted} steps`;
+
+    // Render step log
+    renderExploreSteps(res.steps || []);
+    document.getElementById('explore-steps-card').style.display = 'block';
+
+    // Path badge
+    if (res.pathTaken) {
+      const badge = document.getElementById('explore-path-badge');
+      badge.textContent = `Path ${res.pathTaken} taken`;
+      badge.style.display = 'inline-block';
+    }
+
+    // Populate MD editor
+    document.getElementById('explore-md-editor').value = STATE.exploreMd;
+    document.getElementById('explore-md-card').style.display = 'block';
+
+    setProgress('explore-prog-bar', null, 100);
+    if (res.status === 'error') showToast(`Exploration finished with error: ${res.error}`, 'warn');
+    else showToast('Exploration complete — review the MD and generate your test', 'success');
+
+    loadExplorations();
+  } catch (e) {
+    errEl.textContent = `Exploration failed: ${e.message}`;
+    errEl.style.display = 'block';
+    document.getElementById('explore-form').style.display = 'block';
+    prog.style.display = 'none';
+    showToast('Exploration failed', 'error');
+  }
+}
+
+function renderExploreSteps(steps) {
+  const el = document.getElementById('explore-step-list');
+  el.innerHTML = steps.map(s => {
+    const ok    = s.success;
+    const icon  = ok ? '✅' : '❌';
+    const tries = s.attempts > 1 ? ` <span style="color:#f59e0b">(${s.attempts} attempts)</span>` : '';
+    const sel   = s.selector ? `<span style="color:var(--accent2)">${escHtml(s.selector)}</span>` : '';
+    const obs   = s.observation ? `<div style="color:var(--text3);margin-left:20px">${escHtml(s.observation)}</div>` : '';
+    const err   = s.error ? `<div style="color:#f87171;margin-left:20px">⚠ ${escHtml(s.error)}</div>` : '';
+    const rv    = s.read_value ? `<div style="color:#34d399;margin-left:20px">Read: "${escHtml(s.read_value)}"</div>` : '';
+    return `<div style="margin-bottom:6px">
+      ${icon} <strong>Step ${s.step_num}</strong>: ${escHtml(s.description)}${tries}
+      ${sel ? `<div style="margin-left:20px"><code>${sel}</code></div>` : ''}
+      ${obs}${rv}${err}
+    </div>`;
+  }).join('');
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function generateFromExploration() {
+  const mdContent = document.getElementById('explore-md-editor').value.trim();
+  if (!mdContent) { showToast('No exploration MD to generate from', 'warn'); return; }
+
+  const codeCard = document.getElementById('explore-code-card');
+  codeCard.style.display = 'none';
+  document.getElementById('explore-prog-label').textContent = 'Generating test script from exploration…';
+  setProgress('explore-prog-bar', null, 30);
+
+  try {
+    const res = await api('POST', '/generate-from-exploration', {
+      exploration_id: STATE.exploreId,
+      md_content:     mdContent,
+    });
+
+    if (res.error) { showToast(`Generation failed: ${res.error}`, 'error'); return; }
+
+    STATE.exploreCode = res.generatedCode || '';
+    document.getElementById('explore-code-pre').innerHTML = highlight(STATE.exploreCode);
+    codeCard.style.display = 'block';
+    setProgress('explore-prog-bar', null, 100);
+    document.getElementById('explore-prog-label').textContent = '✅ Test script generated';
+    showToast('Test script generated — review and save as Golden', 'success');
+  } catch (e) {
+    showToast(`Generation error: ${e.message}`, 'error');
+  }
+}
+
+async function saveExploreGolden() {
+  const name = document.getElementById('explore-golden-name').value.trim();
+  if (!name) { showToast('Enter a filename first', 'warn'); return; }
+  if (!STATE.exploreCode) { showToast('No generated code to save', 'warn'); return; }
+
+  const tc = document.getElementById('explore-tc').value.trim();
+  try {
+    await api('POST', '/api/goldens', {
+      name:     name.endsWith('.spec.ts') ? name : name + '.spec.ts',
+      description: `Exploration-driven: ${tc.slice(0,120)}`,
+      code:     STATE.exploreCode,
+      browsers: ['chromium'],
+      analysis: { source: 'explore', explorationId: STATE.exploreId },
+    });
+    showToast('Saved as Golden ✓', 'success');
+    loadGoldens();
+  } catch (e) {
+    showToast(`Save failed: ${e.message}`, 'error');
+  }
+}
+
+function resetExplore() {
+  STATE.exploreId = '';
+  STATE.exploreMd = '';
+  STATE.exploreCode = '';
+  document.getElementById('explore-tc').value = '';
+  document.getElementById('explore-form').style.display = 'block';
+  document.getElementById('explore-progress').style.display = 'none';
+  document.getElementById('explore-error').style.display = 'none';
+  ['explore-steps-card','explore-md-card','explore-code-card'].forEach(id =>
+    document.getElementById(id).style.display = 'none');
+  document.getElementById('explore-path-badge').style.display = 'none';
+}
+
+async function loadExplorations() {
+  const listEl = document.getElementById('explore-history-list');
+  try {
+    const explorations = await api('GET', '/explorations');
+    if (!explorations.length) {
+      listEl.innerHTML = '<span style="color:var(--text3)">No explorations yet.</span>';
+      return;
+    }
+    listEl.innerHTML = explorations.map(e => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div>
+          <span style="font-family:'JetBrains Mono',monospace;color:var(--accent2)">${e.id}</span>
+          <span style="margin-left:8px;color:var(--text2)">${escHtml(e.testCase)}</span>
+          ${e.pathTaken ? `<span style="margin-left:6px;font-size:11px;padding:1px 6px;border-radius:8px;background:#4f46e5;color:#fff">Path ${e.pathTaken}</span>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="color:var(--text3);font-size:11px">${e.stepsCount} steps</span>
+          <button class="btn btn-ghost btn-sm" onclick="loadExploration('${e.id}')">Load</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    listEl.innerHTML = `<span style="color:#f87171">Failed to load explorations</span>`;
+  }
+}
+
+async function loadExploration(id) {
+  try {
+    const res = await api('GET', `/explorations/${id}`);
+    STATE.exploreId = id;
+    STATE.exploreMd = res.markdownContent || '';
+
+    document.getElementById('explore-tc').value = res.testCase || '';
+    document.getElementById('explore-form').style.display = 'block';
+    document.getElementById('explore-progress').style.display = 'none';
+
+    if (res.steps) renderExploreSteps(res.steps);
+    document.getElementById('explore-steps-card').style.display = res.steps?.length ? 'block' : 'none';
+
+    document.getElementById('explore-md-editor').value = STATE.exploreMd;
+    document.getElementById('explore-md-card').style.display = STATE.exploreMd ? 'block' : 'none';
+
+    if (res.pathTaken) {
+      const badge = document.getElementById('explore-path-badge');
+      badge.textContent = `Path ${res.pathTaken} taken`;
+      badge.style.display = 'inline-block';
+    }
+
+    showTab('explore');
+    showToast(`Exploration ${id} loaded`, 'success');
+  } catch(e) {
+    showToast(`Failed to load exploration: ${e.message}`, 'error');
+  }
+}
+
+// Initialise explore tab when first shown
+document.querySelectorAll('.nav-item[data-tab="explore"]').forEach(el =>
+  el.addEventListener('click', () => { loadExplorations(); loadSelectorMemory(); })
+);
+
+// ── Selector Memory ────────────────────────────────────────────────────────
+
+async function loadSelectorMemory() {
+  const el = document.getElementById('selector-memory-list');
+  try {
+    const domains = await api('GET', '/selector-memory');
+    if (!domains.length) {
+      el.innerHTML = '<span style="color:var(--text3)">No selector memory yet — run an exploration to start learning.</span>';
+      return;
+    }
+    el.innerHTML = domains.map(d => {
+      const rows = (d.entries || [])
+        .filter(e => e.confidence !== 'low')
+        .slice(0, 5)
+        .map(e => `
+          <tr>
+            <td style="padding:3px 8px;color:var(--accent2);font-family:'JetBrains Mono',monospace">${escHtml(e.selector)}</td>
+            <td style="padding:3px 8px">${e.action}</td>
+            <td style="padding:3px 8px;color:var(--text3)">${escHtml((e.step_intent||'').slice(0,60))}</td>
+            <td style="padding:3px 8px">
+              <span style="padding:1px 6px;border-radius:8px;font-size:10px;background:${e.confidence==='high'?'#166534':'#854d0e'};color:#fff">${e.confidence}</span>
+              <span style="color:var(--text3);margin-left:4px">${e.success_count}x</span>
+            </td>
+          </tr>`).join('');
+
+      return `<div style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+          <strong style="color:var(--text1)">${escHtml(d.domain)}</strong>
+          <div style="display:flex;gap:8px;font-size:11px;color:var(--text3)">
+            <span style="color:#34d399">${d.high} high</span>
+            <span style="color:#fbbf24">${d.medium} medium</span>
+            <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:1px 6px;color:#f87171"
+              onclick="clearDomainMemory('${escHtml(d.domain)}')">clear</button>
+          </div>
+        </div>
+        ${rows ? `<table style="width:100%;border-collapse:collapse;font-size:11px">${rows}</table>` : '<span style="color:var(--text3)">No high/medium confidence entries yet.</span>'}
+      </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = `<span style="color:#f87171">Failed to load memory</span>`;
+  }
+}
+
+async function clearDomainMemory(domain) {
+  if (!confirm(`Clear all selector memory for ${domain}?`)) return;
+  try {
+    await api('DELETE', `/selector-memory/${encodeURIComponent(domain)}`);
+    showToast(`Memory cleared for ${domain}`, 'success');
+    loadSelectorMemory();
+  } catch(e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+}
+
+async function clearAllMemory() {
+  if (!confirm('Clear ALL selector memory? This cannot be undone.')) return;
+  try {
+    await api('DELETE', '/selector-memory');
+    showToast('All selector memory cleared', 'success');
+    loadSelectorMemory();
+  } catch(e) {
+    showToast(`Failed: ${e.message}`, 'error');
+  }
+}
 </script>
 </body>
 </html>
