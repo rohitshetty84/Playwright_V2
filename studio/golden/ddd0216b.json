@@ -1,0 +1,18 @@
+{
+  "id": "ddd0216b",
+  "name": "onboarding.ts.spec.ts",
+  "description": "Exploration-driven: When a new recruit is being onboarded, an HR admin needs to:\n1. Navigate to https://performancemanager8.successfactors.c",
+  "code": "import { test, expect } from '@playwright/test';\n\ntest.use({ storageState: 'studio/.auth/successfactors.json' });\n\ntest('HR admin onboarding candidate status check', async ({ page }) => {\n  await test.step('Navigate to SuccessFactors start page and wait for dashboard', async () => {\n    await page.goto('https://performancemanager8.successfactors.com/sf/start');\n    await page.waitForSelector('role=heading[name=\"Good afternoon!\"]', { timeout: 30000 });\n  });\n\n  await test.step('Open Home menu and select Onboarding', async () => {\n    await page.click('role=button[name=\"Home\"]');\n    await page.waitForTimeout(1500);\n    await page.click('role=menuitem[name=\"Onboarding\"]');\n    await page.waitForTimeout(1500);\n  });\n\n  await test.step('Search for candidate \"Matthew Moraga\" and select from suggestions', async () => {\n    await page.fill('input[placeholder=\"Search for new recruit\"]', 'Matthew Moraga');\n    // Wait for typeahead suggestions to appear\n    await page.waitForSelector('role=option[name^=\"Matthew Moraga\"]', { timeout: 10000 });\n    await page.click('role=option[name^=\"Matthew Moraga\"]');\n    await page.waitForTimeout(1500);\n  });\n\n  let dataCollectionStatus = '';\n  let complianceStatus = '';\n\n  await test.step('Read Data Collection and Compliance statuses', async () => {\n    // Data Collection status\n    const dataCollectionCell = await page.locator('[role=\"row\"]:has-text(\"Contact details of hiring manager\") >> [role=\"gridcell\"]:nth-child(6)');\n    dataCollectionStatus = (await dataCollectionCell.textContent())?.trim() || '';\n\n    // Compliance status\n    // The exploration doc says this selector failed, but we must use it as per instructions\n    const complianceCell = await page.locator('[role=\"row\"]:has-text(\"Compliance Forms\") >> [role=\"gridcell\"]:nth-child(7)');\n    complianceStatus = (await complianceCell.textContent())?.trim() || '';\n  });\n\n  await test.step('Evaluate statuses and assert onboarding readiness', async () => {\n    if (dataCollectionStatus === 'Completed' && complianceStatus === 'Completed') {\n      // Path A: Both statuses are Completed\n      expect(dataCollectionStatus).toBe('Completed');\n      expect(complianceStatus).toBe('Completed');\n      // Optionally log success\n      console.log('Both Data Collection and Compliance statuses are Completed. Onboarding ready.');\n    } else {\n      // Path B: One or both statuses are not Completed\n      expect.soft(dataCollectionStatus).toBe('Completed');\n      expect.soft(complianceStatus).toBe('Completed');\n      // Optionally log which status is not completed\n      console.warn(`Onboarding not ready. Data Collection: \"${dataCollectionStatus}\", Compliance: \"${complianceStatus}\"`);\n    }\n  });\n});",
+  "browsers": [
+    "chromium"
+  ],
+  "analysis": {
+    "source": "explore",
+    "explorationId": "144b78ad"
+  },
+  "createdAt": "2026-06-08 14:52",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}
