@@ -219,11 +219,24 @@ def _cleanup_artifacts() -> dict:
                 except Exception:
                     pass
 
+    # Remove any stray PNGs that @playwright/mcp wrote to the studio root dir.
+    # These are created when the LLM calls browser_take_screenshot(filename=...)
+    # The bridge now strips that param, but clean up any leftovers from past runs.
+    deleted_root_png = 0
+    for png in BASE.glob("*.png"):
+        try:
+            png.unlink()
+            deleted_root_png += 1
+        except Exception:
+            pass
+
     logger.info(
         f"[cleanup] removed {deleted_mcp} MCP artifact(s), "
-        f"stripped screenshots from {runs_stripped} old run(s) ({deleted_shots} file(s) freed)"
+        f"stripped screenshots from {runs_stripped} old run(s) ({deleted_shots} file(s) freed), "
+        f"deleted {deleted_root_png} stray PNG(s) from studio root"
     )
-    return {"deleted_mcp": deleted_mcp, "runs_stripped": runs_stripped, "deleted_shots": deleted_shots}
+    return {"deleted_mcp": deleted_mcp, "runs_stripped": runs_stripped,
+            "deleted_shots": deleted_shots, "deleted_root_png": deleted_root_png}
 
 # Live SSE queues — one asyncio.Queue per active exploration
 _explore_queues: dict = {}

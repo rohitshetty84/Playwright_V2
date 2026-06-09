@@ -49,6 +49,10 @@ studio/explorations/
 # Playwright MCP transient artifacts — YAML snapshots + console logs written per session
 studio/.playwright-mcp/
 
+# Screenshots the LLM saves to the studio root via browser_take_screenshot(filename=...)
+# These are stripped at the bridge layer now, but keep this as a safety net.
+studio/*.png
+
 # Learned knowledge files — intentionally NOT ignored; commit these
 # (selector_memory.json, exploration_patterns.json, learned_rules.json accumulate real value)
 

@@ -218,6 +218,12 @@ class PlaywrightMCPBridge:
                 "content":        list,       # raw MCP content array
             }
         """
+        # Strip "filename" from screenshot calls — @playwright/mcp writes the
+        # file to the CWD (studio/) when filename is set. Screenshots are already
+        # captured inline as base64 by the exploration pipeline; disk files are noise.
+        if name == "browser_take_screenshot" and "filename" in arguments:
+            arguments = {k: v for k, v in arguments.items() if k != "filename"}
+
         raw = await self._request("tools/call", {"name": name, "arguments": arguments})
         return self._parse_result(raw)
 
