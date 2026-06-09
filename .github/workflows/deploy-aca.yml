@@ -67,14 +67,34 @@ jobs:
           containerAppName: ${{ secrets.ACA_APP_NAME }}
           imageToDeploy: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
 
-      # ── 7. Print the app URL ─────────────────────────────────────────────────
+      # ── 5. Get app URL ───────────────────────────────────────────────────────
       - name: Get app URL
+        id: app_url
         run: |
           URL=$(az containerapp show \
             --name ${{ secrets.ACA_APP_NAME }} \
             --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
             --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "url=https://$URL" >> "$GITHUB_OUTPUT"
           echo "### Deployed" >> $GITHUB_STEP_SUMMARY
           echo "**URL**: https://$URL" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Image**: \`${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
+
+      # ── 6. Post-deploy smoke test ────────────────────────────────────────────
+      # Waits up to 60 s for the container to wake from scale-zero, then runs
+      # a minimal public-site exploration to confirm browser + LLM are working.
+      - name: Smoke test
+        run: |
+          pip install httpx --quiet
+          # Give the container up to 60 s to cold-start after deploy
+          echo "Waiting for container to warm up…"
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.app_url.outputs.url }}/")
+            if [ "$STATUS" = "200" ]; then echo "Server ready (attempt $i)"; break; fi
+            echo "  attempt $i: HTTP $STATUS — retrying in 5s"
+            sleep 5
+          done
+          python scripts/smoke_deploy.py \
+            --url "${{ steps.app_url.outputs.url }}" \
+            --ci
