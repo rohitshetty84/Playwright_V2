@@ -2575,7 +2575,7 @@ def get_github_config():
     gh_token = os.getenv("GITHUB_TOKEN")
     gh_owner = os.getenv("GITHUB_OWNER")
     gh_repo = os.getenv("GITHUB_REPO")
-    gh_workflow = os.getenv("GITHUB_WORKFLOW", "playwright-test.yml")
+    gh_workflow = os.getenv("GITHUB_WORKFLOW", "playwright.yml")
     gh_branch = os.getenv("GITHUB_BRANCH", "main")
 
     if not gh_owner or not gh_repo:
