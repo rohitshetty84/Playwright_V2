@@ -27,8 +27,12 @@ WORKDIR /app
 COPY studio/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── 3. Pre-install @playwright/mcp so explorations don't re-download it ──────
-RUN npm install -g @playwright/mcp
+# ── 3. Pre-install @playwright/mcp and its browser ───────────────────────────
+# Newer @playwright/mcp uses "chrome-for-testing" as the internal browser type
+# (distinct from the Python Playwright Chromium in the base image).
+# Install it here so runtime doesn't fail with "browser not installed".
+RUN npm install -g @playwright/mcp && \
+    npx @playwright/mcp install-browser chromium
 
 # ── 4. Application code ───────────────────────────────────────────────────────
 COPY studio/ ./studio/
