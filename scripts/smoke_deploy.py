@@ -45,17 +45,18 @@ import httpx
 # Deliberately simple: navigate → read title → done.
 # Success proves: browser launched, MCP bridge live, LLM responded, step ran.
 TEST_CASE = """
-1. Navigate to https://example.com
-2. Wait for the page to fully load
-3. Read the text of the h1 heading on the page
-4. Confirm the heading contains the word "Example"
+1. Launch browser.
+2. Navigate to https://www.amazon.sg.
+3. Wait for input[name="field-keywords"] to be visible.
+4. Fill input[name="field-keywords"] with "Magic Tree House Boxed Set".
+5. Press Enter key in input[name="field-keywords"] to submit the search.
 """.strip()
 
 # ── Acceptance thresholds ─────────────────────────────────────────────────────
-MIN_STEPS_EXECUTED = 1        # at least 1 step must actually run (not just be planned)
-MIN_SUCCESS_RATE   = 0.25     # lenient — even a partial run proves infrastructure works
-MAX_STEPS          = 12       # cap so the smoke test stays fast
-TIMEOUT_SECONDS    = 180      # 3 min wall-clock limit
+MIN_STEPS_EXECUTED = 2        # at least 2 steps must run (launch + navigate proves browser works)
+MIN_SUCCESS_RATE   = 0.40     # 40% — steps 1-3 passing is enough to confirm the stack
+MAX_STEPS          = 10       # cap so the smoke test stays fast
+TIMEOUT_SECONDS    = 240      # 4 min — Amazon can be slow to load
 
 # Keyword that must appear in at least one successful step description —
 # confirms we actually navigated somewhere rather than erroring on launch.
