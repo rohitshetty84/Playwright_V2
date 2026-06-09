@@ -89,8 +89,11 @@ jobs:
         run: |
           pip install httpx --quiet
 
-          # Step A: wait for the latest revision to be Running (up to 3 min)
-          echo "Waiting for new revision to become active…"
+          # Step A: wait for the latest revision to be provisioned (up to 3 min).
+          # Accept both "Running" (replicas active) and "ScaledToZero" (healthy,
+          # no traffic yet) — both mean the revision deployed successfully.
+          # "Provisioning" / "Deprovisioning" / empty = still rolling out.
+          echo "Waiting for new revision to be provisioned…"
           for i in $(seq 1 18); do
             LATEST_REV=$(az containerapp revision list \
               --name ${{ secrets.ACA_APP_NAME }} \
@@ -102,8 +105,8 @@ jobs:
               --revision "$LATEST_REV" \
               --query "properties.runningState" -o tsv 2>/dev/null)
             echo "  attempt $i: revision=$LATEST_REV state=$REV_STATE"
-            if [ "$REV_STATE" = "Running" ]; then
-              echo "New revision is Running."
+            if [ "$REV_STATE" = "Running" ] || [ "$REV_STATE" = "ScaledToZero" ]; then
+              echo "Revision is ready (state=$REV_STATE)."
               break
             fi
             sleep 10
