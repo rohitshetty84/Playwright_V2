@@ -3,7 +3,7 @@ Playwright AI Studio — Python/FastAPI backend
 Azure OpenAI powered test synthesis & auto-healing
 """
 
-import os, json, uuid, re, subprocess, tempfile, logging, base64, asyncio
+import os, json, uuid, re, subprocess, tempfile, logging, base64, asyncio, shutil, threading
 from collections import defaultdict
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mK]')
@@ -164,9 +164,66 @@ GOLDEN_DIR.mkdir(exist_ok=True)
 RUNS_DIR.mkdir(exist_ok=True)
 HEALING_DIR.mkdir(exist_ok=True)
 EXPLORATIONS_DIR    = BASE / "explorations"
-SELECTOR_MEMORY_FILE = BASE / "selector_memory.json"
-LEARNED_RULES_FILE   = BASE / "learned_rules.json"
+SELECTOR_MEMORY_FILE  = BASE / "selector_memory.json"
+LEARNED_RULES_FILE    = BASE / "learned_rules.json"
+EXPLORATION_PATTERNS_FILE = BASE / "exploration_patterns.json"  # domain-level interaction patterns
+MCP_ARTIFACTS_DIR     = BASE / ".playwright-mcp"
 EXPLORATIONS_DIR.mkdir(exist_ok=True)
+
+# ── Auto-cleanup ──────────────────────────────────────────────────────────────
+_KEEP_EXPLORATIONS = 20   # keep this many most-recent exploration runs in full
+
+def _cleanup_artifacts() -> dict:
+    """
+    1. Delete ALL .playwright-mcp/ entries — purely transient per-session artifacts.
+    2. Explorations: keep the newest _KEEP_EXPLORATIONS runs intact.
+       For older runs: delete screenshots/ subfolder but preserve steps.json
+       and exploration.md (needed for test-script generation).
+
+    Returns a summary dict with actual counts (used by /api/cleanup response).
+    """
+    deleted_mcp = 0
+    if MCP_ARTIFACTS_DIR.exists():
+        for entry in MCP_ARTIFACTS_DIR.iterdir():
+            try:
+                if entry.is_file():
+                    entry.unlink()
+                else:
+                    shutil.rmtree(entry)
+                deleted_mcp += 1
+            except Exception:
+                pass
+
+    deleted_shots = 0
+    runs_stripped = 0
+    if EXPLORATIONS_DIR.exists():
+        runs = sorted(
+            [d for d in EXPLORATIONS_DIR.iterdir() if d.is_dir()],
+            key=lambda d: d.stat().st_mtime,
+            reverse=True,
+        )
+        for i, run_dir in enumerate(runs):
+            if i < _KEEP_EXPLORATIONS:
+                continue
+            shots = run_dir / "screenshots"
+            if shots.exists():
+                for img in shots.iterdir():
+                    try:
+                        img.unlink()
+                        deleted_shots += 1
+                    except Exception:
+                        pass
+                try:
+                    shots.rmdir()
+                    runs_stripped += 1
+                except Exception:
+                    pass
+
+    logger.info(
+        f"[cleanup] removed {deleted_mcp} MCP artifact(s), "
+        f"stripped screenshots from {runs_stripped} old run(s) ({deleted_shots} file(s) freed)"
+    )
+    return {"deleted_mcp": deleted_mcp, "runs_stripped": runs_stripped, "deleted_shots": deleted_shots}
 
 # Live SSE queues — one asyncio.Queue per active exploration
 _explore_queues: dict = {}
@@ -176,7 +233,7 @@ _explore_cancel: dict = {}   # exploration_id → asyncio.Event
 
 # ── Synthesis tuning ─────────────────────────────────────────────────────────
 MAX_HEAL_ROUNDS    = 3    # Max Phase-1/2 retry cycles before giving up
-MAX_EXPLORE_RETRIES = 2   # Verify-then-act: retries per exploration step before giving up
+MAX_EXPLORE_RETRIES = 4   # Verify-then-act: retries per exploration step before giving up
 LLM_TEMPERATURE   = 0.2  # All LLM calls use a single determinism constant
 LLM_MAX_TOKENS    = 1500 # Default output token budget
 LLM_VISION_TOKENS = 2000 # Vision responses include full TS code — need more room
@@ -186,6 +243,10 @@ NAV_PAUSE_MS      = 2000 # Post-navigation pause so JS-rendered elements appear
 app = FastAPI(title="Playwright AI Studio", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+
+@app.on_event("startup")
+async def _startup_cleanup():
+    _cleanup_artifacts()
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 class SynthesizeRequest(BaseModel):
@@ -730,6 +791,157 @@ def _record_selector_outcome(domain: str, step_desc: str, action: str,
         _save_selector_memory(memory)
     except Exception as me:
         logger.warning(f"[memory] Could not save selector memory: {me}")
+
+
+# ── Exploration pattern memory ────────────────────────────────────────────────
+
+_patterns_lock: threading.Lock = threading.Lock()
+_patterns_cache: Optional[dict] = None   # in-process cache; invalidated on each write
+
+
+def _load_exploration_patterns() -> dict:
+    global _patterns_cache
+    if _patterns_cache is not None:
+        return _patterns_cache
+    try:
+        if EXPLORATION_PATTERNS_FILE.exists():
+            _patterns_cache = json.loads(EXPLORATION_PATTERNS_FILE.read_text())
+            return _patterns_cache
+    except Exception as e:
+        logger.warning(f"[patterns] Could not read exploration patterns: {e}")
+    return {}
+
+
+def _save_exploration_patterns(patterns: dict) -> None:
+    global _patterns_cache
+    try:
+        EXPLORATION_PATTERNS_FILE.write_text(json.dumps(patterns, indent=2, default=str))
+        _patterns_cache = patterns   # update cache after successful write
+    except Exception as e:
+        logger.warning(f"[patterns] Could not save exploration patterns: {e}")
+
+
+def _get_domain_patterns(domain: str) -> list[dict]:
+    """Return stored interaction patterns for a domain, sorted by success count."""
+    return sorted(
+        _load_exploration_patterns().get(domain, {}).get("patterns", []),
+        key=lambda p: p.get("success_count", 0),
+        reverse=True,
+    )
+
+
+def _extract_and_save_patterns(domain: str, steps_log: list, ui_framework: str) -> None:
+    """After an exploration completes, use an LLM to extract reusable interaction
+    patterns from the step results and merge them into exploration_patterns.json.
+
+    Captures what selector-level memory misses:
+    - Navigation workarounds (SAP flyout → JS DOM search)
+    - Steps where URL doesn't change but action succeeded (Go button)
+    - Timing-sensitive sequences (typeahead → wait → Go)
+    - Verify false-negative patterns (model=✅ but verify=❌)
+    """
+    if not domain or not steps_log:
+        return
+
+    # Only run if at least some steps succeeded — no point learning from full failures
+    succeeded = [s for s in steps_log if s.get("success")]
+    if len(succeeded) < 2:
+        return
+
+    # Build a compact summary of each step's outcome
+    step_summary = "\n".join(
+        f"Step {s['step_num']} [{s['action']}] {'✅' if s['success'] else '❌'} "
+        f"attempts={s.get('attempts',1)} "
+        f"selector='{s.get('selector','')[:60]}' "
+        f"obs='{s.get('observation','')[:100]}'"
+        for s in steps_log
+    )
+
+    try:
+        raw = ask_llm(
+            system=(
+                "You extract reusable browser automation patterns from exploration results. "
+                "Focus on non-obvious findings: workarounds, timing dependencies, "
+                "false-negative verify patterns, and elements missing from the accessibility tree."
+            ),
+            user=f"""Domain: {domain}
+UI Framework: {ui_framework}
+
+Exploration results (one line per step):
+{step_summary}
+
+Extract up to 5 reusable interaction patterns that would help future explorations of this domain.
+Only include patterns that are genuinely non-obvious — skip simple 'click X worked' facts.
+Focus on:
+- Steps that needed >1 attempt and what finally worked
+- Steps where the action doesn't change the URL but still succeeded (filter buttons, in-page updates)
+- Elements not in the accessibility tree that needed a DOM workaround
+- Timing dependencies between steps (e.g. wait after typeahead before next click)
+
+Return ONLY a JSON array (empty array if nothing worth saving):
+[{{"trigger": "short phrase that identifies when to apply this pattern",
+  "pattern": "concise description of what works and why",
+  "anti_pattern": "what to avoid (optional, omit if none)",
+  "confidence": 0.5-1.0}}]""",
+            max_tokens=800,
+            temperature=0,
+        )
+        raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
+        new_patterns: list = json.loads(raw)
+        if not isinstance(new_patterns, list):
+            return
+    except Exception as e:
+        logger.warning(f"[patterns] LLM extraction failed: {e}")
+        return
+
+    if not new_patterns:
+        return
+
+    with _patterns_lock:
+        all_patterns = _load_exploration_patterns()
+        domain_data  = all_patterns.setdefault(domain, {"patterns": []})
+        existing     = domain_data["patterns"]
+
+        for np in new_patterns:
+            trigger = np.get("trigger", "").strip()
+            if not trigger:
+                continue
+            match = next(
+                (e for e in existing if _intent_similarity(e.get("trigger", ""), trigger) > 0.6),
+                None,
+            )
+            if match:
+                match["success_count"] = match.get("success_count", 0) + 1
+                match["pattern"]       = np.get("pattern", match["pattern"])
+                if np.get("anti_pattern"):
+                    match["anti_pattern"] = np["anti_pattern"]
+            else:
+                existing.append({
+                    "id":            str(uuid.uuid4())[:8],
+                    "trigger":       trigger,
+                    "pattern":       np.get("pattern", ""),
+                    "anti_pattern":  np.get("anti_pattern", ""),
+                    "confidence":    np.get("confidence", 0.7),
+                    "success_count": 1,
+                    "last_seen":     datetime.now().strftime("%Y-%m-%d"),
+                })
+
+        _save_exploration_patterns(all_patterns)
+    logger.info(f"[patterns] Saved {len(new_patterns)} pattern(s) for {domain}")
+
+
+def _format_patterns_for_prompt(domain: str, max_patterns: int = 5) -> str:
+    """Format stored domain patterns as a text block for injection into prompts."""
+    patterns = _get_domain_patterns(domain)[:max_patterns]
+    if not patterns:
+        return ""
+    lines = ["Learned interaction patterns for this app (apply when relevant):"]
+    for p in patterns:
+        line = f"  • [{p['trigger']}] {p['pattern']}"
+        if p.get("anti_pattern"):
+            line += f" — avoid: {p['anti_pattern']}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # ── Exploration helpers ───────────────────────────────────────────────────────
@@ -3681,6 +3893,7 @@ async def _run_step_with_mcp(
     shots_dir:      "Path",
     queue:          Optional[asyncio.Queue],
     correction_hints: str = "",
+    domain:           str = "",
 ) -> dict:
     """Run one exploration step via Azure OpenAI function-calling + Playwright MCP.
 
@@ -3717,6 +3930,9 @@ async def _run_step_with_mcp(
         + "\n".join(f"  ⚡ {r}" for r in extra_rules)
     ) if extra_rules else ""
 
+    # Patterns learned from past explorations of this domain (auto-extracted after each run)
+    domain_patterns_block = _format_patterns_for_prompt(domain) if domain else ""
+
     correction_block = (
         f"\n⚡ CORRECTION — PREVIOUS ATTEMPT FAILED. Apply these findings before acting:\n{correction_hints}\n"
         if correction_hints else ""
@@ -3741,6 +3957,7 @@ async def _run_step_with_mcp(
 {correction_block}
 {dom_state_block}
 {framework_rules}
+{domain_patterns_block}
 {learned_block}
 {hints_block}
 
@@ -4610,6 +4827,7 @@ async def _run_exploration(req: ExploreRequest,
         step_counter      = 0
         last_failed_step  = ""   # most-recent failed/blocked (propagates the chain)
         last_root_failure = ""   # original cause — only set on actual step failures
+        current_domain    = ""   # populated on first step; guards pattern-learning task
 
         for step in steps[:req.max_steps]:
             step_id   = step.get("id", step_counter + 1)
@@ -4704,6 +4922,7 @@ async def _run_exploration(req: ExploreRequest,
                 bridge, step_desc, step_type, history_ctx, memory_hints,
                 ui_framework, _active_extra_rules(), exploration_id,
                 step_counter, shots_dir, queue,
+                domain=current_domain,
             )
 
             # ── Explicit VERIFY phase — separate LLM call with after-screenshot ──
@@ -4793,6 +5012,36 @@ async def _run_exploration(req: ExploreRequest,
                             ))
                 step_result["success"] = True
 
+            # Anti-false-positive for navigation steps: verify overrode model ❌→✅
+            # but the URL didn't change — the model was right, the click didn't navigate.
+            # "Element visible in flyout" ≠ "navigated to target page."
+            # Revert to ❌ so the retry loop can try a different approach.
+            _is_nav_click = step_type == "navigate" or any(
+                kw in step_desc.lower()
+                for kw in ("from menu", "from the menu", "from dropdown", "from the dropdown",
+                           "from flyout", "flyout", "menu item", "menu option",
+                           "navigation item", "nav item")
+            )
+            if (
+                _verify_overrode_model
+                and step_result.get("success")       # verify said ✅
+                and not model_success                 # model said ❌
+                and bool(url_before_step)
+                and bool(url_after_step)
+                and url_before_step == url_after_step # URL didn't change — no navigation
+                and _is_nav_click
+            ):
+                await _emit(queue, "log", level="warn",
+                            message=(
+                                f"⚖️ Nav-step anti-false-positive: verify said ✅ but URL unchanged "
+                                f"after navigation click — model's ❌ was correct, triggering retry"
+                            ))
+                step_result["success"] = False
+                step_result["observation"] = (
+                    f"Navigation click did not change URL (still {url_after_step.split('/')[-1]}). "
+                    + step_result.get("observation", "")
+                )
+
             if (
                 not step_result.get("success", False)
                 and action_raw != "blocked"
@@ -4802,74 +5051,119 @@ async def _run_exploration(req: ExploreRequest,
                             message=f"🔄 Step {step_counter} failed — gathering DOM context for retry…")
                 try:
                     _dom_info = await _gather_dom_on_failure(
-                        bridge,
-                        step_desc,
-                        step_result.get("selector", ""),
+                        bridge, step_desc, step_result.get("selector", ""),
                     )
                 except Exception as _de:
                     _dom_info = f"(DOM inspection error: {_de})"
                     logger.warning(f"[EXPLORE {exploration_id}] DOM inspection failed: {_de}")
 
-                # Build correction hints from DOM + verify's diagnosis
-                _corr_hint  = step_result.get("correction_hint", "")
-                _fail_obs   = step_result.get("observation", "")
-                # Add nav-flyout hint for navigation steps — flyout closes between steps
+                _corr_hint = step_result.get("correction_hint", "")
+                _fail_obs  = step_result.get("observation", "")
+
+                # NAV flyout hint (attempt-1 only — already established on first retry)
                 _nav_hint = (
-                    "\n⚠️ NAV FLYOUT NOTE: The SAP navigation flyout may have closed. "
-                    "Take a browser_take_screenshot first. If the flyout is not open, "
-                    "click the Home button to reopen it before clicking Onboarding.\n"
-                    if any(kw in step_desc.lower() for kw in ("onboarding", "menu", "flyout", "navigation", "nav"))
+                    "\n⚠️ NAV FLYOUT NOTE: The SAP navigation flyout renders outside the ARIA "
+                    "tree. Standard role=menuitem selectors will not find it. "
+                    "Take a screenshot first. If the flyout is open, use browser_evaluate with "
+                    "this EXACT JS to click the item by text:\n"
+                    "  () => { const els = Array.from(document.querySelectorAll("
+                    "'a,[role=\"menuitem\"],[role=\"option\"],button')); "
+                    "const el = els.find(e => e.offsetParent !== null && e.textContent.trim() === 'Onboarding'); "
+                    "if (el) { el.click(); return 'clicked'; } return 'not found'; }\n"
+                    if any(kw in step_desc.lower()
+                           for kw in ("onboarding", "menu", "flyout", "navigation", "nav"))
                     else ""
                 )
-                _correction = (
-                    f"WHAT FAILED: {_fail_obs[:300]}\n"
-                    + (f"DIAGNOSIS: {_corr_hint}\n" if _corr_hint else "")
-                    + _nav_hint
-                    + f"DOM STATE AT FAILURE:\n{_dom_info}"
-                )
-                await _emit(queue, "log", level="info",
-                            message=f"🔄 Retrying step {step_counter} with DOM correction context…")
-                logger.info(f"[EXPLORE {exploration_id}] Retry step {step_counter} — correction:\n{_correction[:300]}")
 
-                _attempts = 2
-                url_before_step = await bridge.get_current_url()
-                step_result = await _run_step_with_mcp(
-                    bridge, step_desc, step_type, history_ctx, memory_hints,
-                    ui_framework, _active_extra_rules(), exploration_id,
-                    step_counter, shots_dir, queue,
-                    correction_hints=_correction,
-                )
+                for _retry_num in range(1, MAX_EXPLORE_RETRIES + 1):
+                    # Escalating strategy hint — get progressively more aggressive
+                    if _retry_num == 1:
+                        _strategy_hint = ""
+                    elif _retry_num == 2:
+                        _strategy_hint = (
+                            "\n⚠️ FALLBACK STRATEGY (attempt 3): Previous click attempts failed. "
+                            "Try a completely different approach:\n"
+                            "  • If clicking a nav item: use browser_navigate to go directly to "
+                            "the target page URL instead of clicking through the flyout.\n"
+                            "  • If clicking a button: try browser_evaluate to click it via JS.\n"
+                            "  • If filling a field: try browser_click on the field first, then fill.\n"
+                        )
+                    else:
+                        _strategy_hint = (
+                            "\n⚠️ STATE-RESET STRATEGY (attempt 4+): Multiple approaches failed. "
+                            "1. Take a screenshot — identify the exact current state.\n"
+                            "2. If a flyout or overlay is open, close it (Escape key or click outside).\n"
+                            "3. Navigate back to the known starting point for this step.\n"
+                            "4. Perform the action fresh using a different method than all prior attempts.\n"
+                        )
 
-                # Verify the retry result
-                action_raw2 = step_result.get("action", "")
-                if action_raw2 not in ("blocked", ""):
-                    url_after_retry = ""
-                    after_b64_retry = None
-                    try:
-                        _rshot = await bridge.call_tool("browser_take_screenshot", {})
-                        url_after_retry = await bridge.get_current_url()
-                        after_b64_retry = _rshot.get("screenshot_b64")
-                        if after_b64_retry and shots_dir:
-                            _rfname = f"step-{step_counter:03d}-retry-verify.png"
-                            (shots_dir / _rfname).write_bytes(
-                                __import__("base64").b64decode(after_b64_retry)
-                            )
-                            step_result.setdefault("screenshot_file", _rfname)
-                    except Exception:
-                        pass
-
-                    step_result = await _verify_step_mcp(
-                        step_desc, action_raw2,
-                        step_result.get("selector", ""),
-                        url_before_step, url_after_retry,
-                        after_b64_retry, step_result,
+                    _correction = (
+                        f"WHAT FAILED: {_fail_obs[:300]}\n"
+                        + (f"DIAGNOSIS: {_corr_hint}\n" if _corr_hint else "")
+                        + (_nav_hint if _retry_num == 1 else "")
+                        + _strategy_hint
+                        + f"DOM STATE AT FAILURE:\n{_dom_info}"
                     )
+
+                    _attempts = _retry_num + 1
+                    await _emit(queue, "log", level="info",
+                                message=f"🔄 Retrying step {step_counter} (attempt {_attempts}/{MAX_EXPLORE_RETRIES + 1})…")
+                    logger.info(
+                        f"[EXPLORE {exploration_id}] Retry {_retry_num} step {step_counter} "
+                        f"— correction:\n{_correction[:300]}"
+                    )
+
+                    url_before_step = await bridge.get_current_url()
+                    step_result = await _run_step_with_mcp(
+                        bridge, step_desc, step_type, history_ctx, memory_hints,
+                        ui_framework, _active_extra_rules(), exploration_id,
+                        step_counter, shots_dir, queue,
+                        correction_hints=_correction,
+                        domain=current_domain,
+                    )
+
+                    # Verify the retry result
+                    action_rawR = step_result.get("action", "")
+                    if action_rawR not in ("blocked", ""):
+                        url_after_retry = ""
+                        after_b64_retry = None
+                        try:
+                            _rshot = await bridge.call_tool("browser_take_screenshot", {})
+                            url_after_retry = await bridge.get_current_url()
+                            after_b64_retry = _rshot.get("screenshot_b64")
+                            if after_b64_retry and shots_dir:
+                                _rfname = f"step-{step_counter:03d}-retry{_retry_num}-verify.png"
+                                (shots_dir / _rfname).write_bytes(
+                                    __import__("base64").b64decode(after_b64_retry)
+                                )
+                                step_result.setdefault("screenshot_file", _rfname)
+                        except Exception:
+                            pass
+
+                        step_result = await _verify_step_mcp(
+                            step_desc, action_rawR,
+                            step_result.get("selector", ""),
+                            url_before_step, url_after_retry,
+                            after_b64_retry, step_result,
+                        )
+                        # Apply URL-change guard to retry verification as well
+                        _retry_url_changed = (
+                            bool(url_before_step) and bool(url_after_retry)
+                            and url_before_step != url_after_retry
+                        )
+                        if _retry_url_changed and not step_result.get("success"):
+                            step_result["success"] = True
+                            step_result.setdefault("observation", f"URL navigated to {url_after_retry}")
+
                     if step_result.get("success"):
                         await _emit(queue, "log", level="info",
-                                    message=f"✅ Retry succeeded for step {step_counter}")
+                                    message=f"✅ Retry {_retry_num} succeeded for step {step_counter}")
+                        break
                     else:
                         await _emit(queue, "log", level="warn",
-                                    message=f"❌ Retry also failed for step {step_counter}")
+                                    message=f"❌ Retry {_retry_num} failed for step {step_counter}"
+                                    + (f" ({MAX_EXPLORE_RETRIES - _retry_num} attempt(s) remaining)"
+                                       if _retry_num < MAX_EXPLORE_RETRIES else " — giving up"))
 
             success  = step_result.get("success", False)
             action   = step_result.get("action", "")
@@ -4958,6 +5252,20 @@ async def _run_exploration(req: ExploreRequest,
 
         logger.info(f"[EXPLORE {exploration_id}] ✅ Done — {step_counter} steps, MD saved")
 
+        # ── Feed learnings back into the knowledge context ─────────────────
+        # Run in background — don't block the completion event on LLM call.
+        if current_domain:
+            def _log_pattern_error(task):
+                if not task.cancelled() and task.exception():
+                    logger.warning(f"[patterns] Background extraction failed: {task.exception()}")
+            _pt = asyncio.create_task(
+                asyncio.to_thread(
+                    _extract_and_save_patterns,
+                    current_domain, steps_log, ui_framework,
+                )
+            )
+            _pt.add_done_callback(_log_pattern_error)
+
         # [PLAYWRIGHT-CLI] await ctx.close(); await browser.close(); await pb.stop()
         await bridge.stop()  # MCP: shut down the MCP server subprocess
 
@@ -5045,6 +5353,12 @@ Status reading from the Onboarding dashboard — EXACT SEQUENCE (do not skip the
   Do NOT search for ui5-table-row:has-text("Data Collection") — that row does not exist.
 """ if is_sf else ""
 
+    # Pull in any patterns learned from past explorations of this domain.
+    # Derive the domain from the test case URL so staging/prod tenants get their own patterns.
+    _url_m = re.search(r'https?://([^/\s]+)', req.test_case)
+    sf_domain = _url_m.group(1) if _url_m else "performancemanager8.successfactors.com"
+    learned_patterns_block = _format_patterns_for_prompt(sf_domain, max_patterns=8) if is_sf else ""
+
     system_prompt = f"""You are an expert browser automation engineer specialising in {req.app_context}.
 Your task is to expand a high-level test description into detailed, explicit step-by-step browser automation instructions.
 
@@ -5056,7 +5370,8 @@ Rules:
 - Do NOT change the intent of the test — only add missing navigation and interaction detail.
 - Preserve the URL from the original description.
 - Output numbered steps only — no prose, no headers, no explanations.
-{sf_nav_knowledge}"""
+{sf_nav_knowledge}
+{learned_patterns_block}"""
 
     user_prompt = f"""Expand this test description into detailed browser automation steps:
 
@@ -5342,6 +5657,18 @@ async def clear_all_selector_memory():
     """Clear all selector memory."""
     _save_selector_memory({})
     return {"cleared": "all"}
+
+
+@app.post("/api/cleanup")
+async def trigger_cleanup():
+    """Manually trigger artifact cleanup (same as startup cleanup)."""
+    summary = _cleanup_artifacts()
+    return {
+        "mcp_artifacts_deleted": summary["deleted_mcp"],
+        "screenshots_deleted":   summary["deleted_shots"],
+        "runs_stripped":         summary["runs_stripped"],
+        "kept_full":             _KEEP_EXPLORATIONS,
+    }
 
 
 # ─ Health check endpoints ──────────────────────────────────────────────────────

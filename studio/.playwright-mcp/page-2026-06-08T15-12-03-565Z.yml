@@ -1,4 +1,0 @@
-- main [ref=e19]:
-  - generic "Loading..." [ref=e25]:
-    - progressbar "Please wait" [active] [ref=e27]
-    - generic [ref=e34]: Loading...

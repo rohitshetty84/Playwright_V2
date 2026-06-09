@@ -45,7 +45,12 @@ studio/runs/
 studio/logs/
 studio/.auth/
 studio/explorations/
-studio/selector_memory.json
+
+# Playwright MCP transient artifacts — YAML snapshots + console logs written per session
+studio/.playwright-mcp/
+
+# Learned knowledge files — intentionally NOT ignored; commit these
+# (selector_memory.json, exploration_patterns.json, learned_rules.json accumulate real value)
 
 # ── Editors / OS ──────────────────────────────────────────────────────────────
 .vscode/

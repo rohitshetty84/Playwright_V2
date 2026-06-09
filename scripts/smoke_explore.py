@@ -119,7 +119,7 @@ def run_smoke(base_url: str, max_steps: int, timeout: int, headless: bool, ci: b
         "storage_state": STORAGE_STATE,
         "max_steps":     max_steps,
         "headless":      headless,
-        "max_restarts":  args.restarts,
+        "max_restarts":  restarts,
     }
     try:
         r = httpx.post(f"{base_url}/api/explore/start", json=payload, timeout=30)

@@ -1,50 +1,119 @@
 # Playwright AI Studio
 
-AI-powered Playwright test synthesis and auto-healing platform.
-Backed by **Azure OpenAI** (GPT-4o) · Python **FastAPI** · single-file HTML frontend.
-
-> Runs **locally** for authoring and healing tests, and on **GitHub Actions**
-> for headless execution against every push / pull request.
+AI-powered browser automation tool. Describe a test in plain English, watch it drive a real browser step-by-step, then promote the verified result as a golden test file that runs in CI.
 
 ---
 
-## Prerequisites
-
-| Tool | Version | Used by |
-|------|---------|---------|
-| Python | 3.11+ | FastAPI backend, CI helper scripts |
-| Node.js | 20+ | Playwright test runner |
-| Azure OpenAI resource | GPT-4o deployed | Synthesize + heal (local dev) |
-| GitHub account | repo + Actions enabled | CI execution |
-
----
-
-## Local quickstart
+## Quick Start
 
 ```bash
-# 1. Clone / copy this folder into your project
 cd studio
-
-# 2. Create a virtual environment
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-
-# 3. Install backend dependencies
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# 4. Configure Azure OpenAI
-cp ../.env.example .env
-# Edit .env — fill in your endpoint, key, and deployment name
-
-# 5. Start the server
-python server.py
+cp ../.env.example .env        # fill in your Azure OpenAI credentials
+python3 -m uvicorn server:app --host 0.0.0.0 --port 7860
 ```
 
-Then open **http://localhost:8000** in your browser.
+Open **http://localhost:7860** — you land on the Explore tab.
 
-### Local Playwright run (optional)
+---
 
-To exercise the goldens locally exactly the way CI will:
+## The Four Tabs
+
+### 🔍 Explore — main workflow
+
+The browser explorer is the primary entry point. It takes a plain-English test description, drives a real Chromium browser through every step, verifies each action, and produces a structured Markdown report of what happened.
+
+**How to use it:**
+
+1. **Paste your test case** in the text area. Include the full starting URL and describe every step, including conditional branches (Path A / Path B). Example:
+   ```
+   1. Navigate to https://my-app.example.com/dashboard
+   2. Click the "New Request" button
+   3. Fill in the "Employee Name" field with "Jane Smith"
+   4. Submit the form
+   5. Verify the confirmation banner appears
+   ```
+
+2. **Select an Application Context** from the dropdown (SAP SuccessFactors, Workday, ServiceNow, etc.) or choose "Custom" and type your own. This tells the AI which navigation patterns and UI framework to expect.
+
+3. **(Optional) Click ✨ Enrich Steps.** The AI expands your high-level description into granular steps — explicit clicks, waits, menu openings — using knowledge of the selected app. A preview appears for you to review and edit before continuing. Click "✓ Use this" to apply.
+
+4. **Set Auth Session** — the filename stem of your saved auth state under `studio/.auth/` (e.g. `successfactors` → loads `studio/.auth/successfactors.json`). This lets the browser skip the login screen.
+
+5. **Adjust Max Steps** if your flow is long (default: 25).
+
+6. **Headless** — checked by default; the browser runs silently in the background. Uncheck to watch it happen on screen.
+
+7. **Click 🔍 Start Exploration.** A live log streams below the button showing each step as it executes. Steps show ✅ / ❌ with the action taken, selector used, and number of attempts.
+
+8. **When complete**, the Exploration Result card appears with a Markdown summary. From here you can:
+   - **Generate Golden** — promotes the exploration into a TypeScript Playwright test file saved as a Golden
+   - **Copy Markdown** — copy the step-by-step report for documentation or debugging
+
+---
+
+### 📄 Golden Files
+
+Goldens are the source-of-truth test scripts. They are committed to the repository and executed by CI on every push.
+
+**What you can do here:**
+
+- **View all goldens** — each card shows the test name, description, last heal date, and heal count
+- **Copy code** — grab the raw TypeScript for any golden
+- **⬆️ Sync to GitHub** — commits and pushes any unsaved goldens so the CI pipeline can find them
+- **▶ Dispatch GitHub workflow** — run specific goldens in CI right now without waiting for a push. Enter the golden IDs separated by commas (or click "Fill all IDs") then click "Run selected IDs"
+
+Golden files are never silently modified. The only way a golden changes is if you explicitly promote a healed version in the Auto-Heal tab.
+
+---
+
+### ▶ Run History
+
+Shows results from GitHub Actions CI runs — pass/fail per step, duration, error messages.
+
+- Results sync automatically when you open the tab
+- Click **↺ Refresh from GitHub** to pull the latest
+- Failed runs show the exact error message and the step that failed — use this to decide whether to trigger Auto-Heal
+
+---
+
+### 🔧 Auto-Heal
+
+When CI starts failing, Auto-Heal analyses the failures, generates a fixed script, and shows you the diff. You decide whether to promote it.
+
+**How to use it:**
+
+1. Switch to the Auto-Heal tab — a red badge on the tab icon shows how many goldens have recent failures
+2. **Select a Golden** from the dropdown (failures are flagged with ❌)
+3. **Click 🔧 Run Auto-Heal** — the AI reads the failure errors and generates a healed TypeScript file with `[AI-HEAL]` inline comments explaining each change
+4. **Review the Changes Made** section — a summary of what was fixed and why
+5. **Review the Healed Script** — the full TypeScript with changes highlighted
+6. **Promote or discard:**
+   - **✓ Promote as New Golden** — replaces the current golden with the healed version (heal count increments)
+   - **Discard** — throws away the suggestion; the current golden is unchanged
+
+The current golden is **never overwritten without your approval**.
+
+---
+
+## Setting Up Auth (First Time)
+
+The browser explorer needs a saved login session to skip the auth wall on each run.
+
+```bash
+# Record your session once
+npx ts-node scripts/auth.ts
+# Follow the browser prompt to log in — saves studio/.auth/<app>.json
+```
+
+The auth file is gitignored and stays local. Re-record it when it expires (typically 30 days for SSO-based apps).
+
+---
+
+## Running Tests Locally
+
+To run the goldens on your machine exactly as CI does:
 
 ```bash
 npm install
@@ -55,211 +124,72 @@ npx playwright test
 
 ---
 
-## Running on GitHub Actions
+## CI / GitHub Actions
 
-The workflow definition lives in `.github/workflows/playwright.yml`. It has three jobs:
+The workflow in `.github/workflows/playwright.yml` runs automatically on push, pull request, and nightly. It:
 
-| Job | What it does |
-|-----|--------------|
-| `prepare-goldens` | Reads `studio/golden/*.json` and writes each `code` field out as `tests/<name>.spec.ts`. Uploads `tests/` as an artifact. |
-| `playwright-test` | `npm ci` + `npx playwright install --with-deps msedge` + `npx playwright test`. Emits HTML report, JUnit, and `results.json` as artifacts. |
-| `report-runs` | POSTs the run summary back to a deployed Studio at `$PLAYWRIGHT_AI_STUDIO_URL/api/runs`. Skipped automatically if that **variable** is unset. |
+1. Exports `studio/golden/*.json` → `tests/*.spec.ts`
+2. Runs `npx playwright test` on `ubuntu-latest`
+3. Posts results back to Studio (if `PLAYWRIGHT_AI_STUDIO_URL` is set as a repo variable)
 
-Triggers (in the workflow `on:` block): pushes to `main`, pull requests against `main`, a nightly schedule (`0 2 * * *` UTC), and manual `workflow_dispatch` from the Actions tab.
+**Required GitHub Secrets / Variables** (Settings → Secrets and variables → Actions):
 
-### 1. Enable Actions on the repo
-
-In GitHub: **Settings → Actions → General** → ensure "Allow all actions" (or at minimum "Allow actions created by GitHub" plus the specific marketplace action `mikepenz/action-junit-report` if you're locking down). The workflow runs on GitHub-hosted `ubuntu-latest` runners by default — no self-hosted runner needed.
-
-If you'd rather run on a **self-hosted runner**, change `runs-on: ubuntu-latest` in each job to `runs-on: [self-hosted, linux]` (or your runner label). Make sure the host has Python 3.11+ and Node 20+ installed.
-
-### 2. Add repository secrets and variables
-
-GitHub: **Settings → Secrets and variables → Actions**. Two tabs — **Secrets** (encrypted, never echoed in logs) and **Variables** (plaintext, fine for non-sensitive flags).
-
-| Name | Type | Required? | Notes |
-|------|------|-----------|-------|
-| `PLAYWRIGHT_AI_STUDIO_URL` | **Variable** | optional | e.g. `https://studio.example.com`. Acts as the gate — the `report-runs` job only runs when this variable is set. |
-| `PLAYWRIGHT_AI_STUDIO_TOKEN` | **Secret** | optional | Sent as `Authorization: Bearer …` to `/api/runs` if your deployment requires auth. |
-| `GOLDEN_ID` | **Variable** | optional | Which golden to attribute the run to. Defaults to `ci-run` if unset. |
-| `BROWSER` | **Variable** | optional | Defaults to `msedge`. |
-| `AZURE_OPENAI_ENDPOINT` | **Variable** | only for auto-heal jobs | Not used by default CI run. Add if you wire up a nightly heal job. |
-| `AZURE_OPENAI_API_KEY` | **Secret** | only for auto-heal jobs | Always keep as a secret, never a variable. |
-| `AZURE_OPENAI_API_VERSION` | **Variable** | only for auto-heal jobs | e.g. `2024-02-01`. |
-| `AZURE_OPENAI_DEPLOYMENT` | **Variable** | only for auto-heal jobs | e.g. `gpt-4o`. |
-
-Rule of thumb: **Secrets** for anything you'd be unhappy to see in a job log; **Variables** for URLs, flags, and switches.
-
-### 3. Push and watch
-
-On the next push the workflow runs automatically. Open the **Actions** tab → click the run → scroll to **Artifacts** at the bottom:
-
-- `playwright-report` — HTML report, traces, videos, screenshots, `results.json`, and `junit.xml`
-- JUnit results are also rendered as a check summary on the commit / PR via the `action-junit-report` step
-- `tests` — the materialized `.spec.ts` files (useful for debugging selector drift)
-
-### 4. (Optional) Schedule and manual triggers
-
-The workflow already includes both:
-
-- **Schedule**: nightly at `0 2 * * *` UTC (edit the cron in the `on.schedule` block).
-- **Manual**: Actions tab → "Playwright AI Studio" workflow → **Run workflow** button (uses the `workflow_dispatch` trigger).
-
-### 5. Running only specific goldens
-
-By default the workflow runs **every** `*.json` file in `golden/`. To run a subset, there are two ways — pick whichever fits the situation.
-
-**Way A — one-shot from the UI (no commit needed)**
-
-Actions tab → "Playwright AI Studio" → **Run workflow** button → in the **"Comma-separated golden IDs"** text box, type the IDs you want:
-
-```
-onboarding-test,4217f745
-```
-
-Click **Run workflow**. Only those goldens get materialized and tested. Useful for "I just changed one spec, only run that one."
-
-**Way B — standing default for every push/PR/scheduled run**
-
-Settings → Secrets and variables → Actions → **Variables** tab → New repository variable:
-
-| Name | Value |
-|------|-------|
-| `GOLDEN_IDS` | `onboarding-test,4217f745` |
-
-Now every automatic run (push, PR, nightly cron) only runs that subset. Remove the variable to go back to "run all."
-
-**Precedence**: the workflow_dispatch input (Way A) wins if both are set, so you can override the standing default for a one-off run without touching settings.
-
-**How matching works**: an ID matches if it equals either the `id` field inside the golden JSON or the filename stem (they're usually the same). Matching is case-insensitive, and whitespace around commas is fine. Unknown IDs produce a `WARNING` in the job log but don't fail the run — so a typo is visible but not catastrophic.
+| Name | Type | Purpose |
+|------|------|---------|
+| `AZURE_OPENAI_ENDPOINT` | Variable | Azure OpenAI resource URL |
+| `AZURE_OPENAI_API_KEY` | **Secret** | API key — always a secret |
+| `AZURE_OPENAI_API_VERSION` | Variable | e.g. `2024-02-01` |
+| `AZURE_OPENAI_DEPLOYMENT` | Variable | e.g. `gpt-4o` |
+| `PLAYWRIGHT_AI_STUDIO_URL` | Variable | Optional — enables run reporting back to Studio |
 
 ---
 
-## .env values (local dev)
+## .env (local dev only)
 
 ```env
 AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
 AZURE_OPENAI_API_KEY=your-key
 AZURE_OPENAI_API_VERSION=2024-02-01
-AZURE_OPENAI_DEPLOYMENT=gpt-4o      # match your Azure deployment name
+AZURE_OPENAI_DEPLOYMENT=gpt-4o
 ```
 
-`.env` is for **local dev only** — never commit it. In CI, the same names come
-from GitHub repository secrets and variables (see above), so `server.py` picks
-them up without changes.
+Never commit `.env`. In CI the same values come from GitHub secrets/variables.
 
 ---
 
-## Workflow
-
-### 1 — Synthesize
-Describe your test case in plain English (e.g. "Path A — update National ID, set email Is Primary = No, submit").
-Paste any existing script fragments as hints.
-AI analyses selector risks, applies healing strategies, and generates a complete TypeScript Playwright file.
-Save it as a **Golden** file.
-
-### 2 — Golden Files
-Immutable reference scripts. Each golden tracks its heal count and last-healed date.
-Golden files are **never silently modified**. In CI they're exported to `tests/` per pipeline run, never edited in place.
-
-### 3 — Run History
-After each Playwright run, results are POSTed to `/api/runs`. In CI this is done automatically by `ci/report_run.py`.
-Pass/fail per candidate is displayed with full error messages.
-
-### 4 — Auto-Heal
-Select a golden with recent failures.
-AI reads the failure errors, generates a healed script with `[AI-HEAL]` inline comments, shows you the changes, and only promotes after your explicit approval.
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/goldens` | List all golden files |
-| POST | `/api/goldens` | Save a new golden |
-| POST | `/api/goldens/sync` | Commit and push all goldens to GitHub |
-| PATCH | `/api/goldens/{id}/promote` | Promote healed code as golden |
-| GET | `/api/runs` | List all test runs |
-| POST | `/api/runs` | Record a new test run |
-| POST | `/api/synthesize/with-validation` | Synthesize → run locally → vision-heal loop → ready for golden |
-| POST | `/api/heal/{golden_id}` | Vision-assisted auto-heal (returns healed code + change summary) |
-| POST | `/api/heal-and-validate/{golden_id}` | Heal + run locally — returns pass/fail instantly |
-| POST | `/api/trigger-ci/{golden_id}` | Dispatch GitHub Actions workflow for a golden |
-| GET | `/api/workflow-status/{golden_id}` | Poll status of the latest CI run |
-| GET | `/api/health` | Basic health check |
-
----
-
-## Recording a run from Playwright (manual)
-
-The CI pipeline does this for you via `ci/report_run.py`. To do it by hand:
-
-```python
-import requests
-
-requests.post("http://localhost:8000/api/runs", json={
-    "golden_id": "your-golden-id",
-    "browser": "msedge",
-    "candidates": [
-        {"name": "Rosa Philp",  "path": "A", "status": "pass", "duration": "48s"},
-        {"name": "Test Candidate", "path": "B", "status": "fail", "duration": "12s",
-         "error": "TimeoutError: element not found after 15000ms"},
-    ]
-})
-```
-
----
-
-## File structure
+## File Structure
 
 ```
-.                                   ← repo root
-├── .github/workflows/
-│   └── playwright.yml              # GitHub Actions: export → test → report
-├── ci/
-│   ├── export_goldens.py           # golden/*.json  →  tests/*.spec.ts
-│   ├── report_run.py               # results.json   →  POST /api/runs
-│   └── requirements.txt            # CI only: requests
+.
 ├── studio/
-│   ├── server.py                   # FastAPI backend
-│   ├── requirements.txt            # Python deps (FastAPI, OpenAI, etc.)
-│   ├── healing_engine.py           # Error signature + targeted-heal logic
-│   ├── static/
-│   │   └── index.html              # Full UI — no build step
-│   ├── golden/                     # Source-of-truth golden JSON files (committed)
-│   ├── runs/                       # Auto-created — run result JSON files
-│   └── healing_history/            # Heal attempt audit trail
-├── package.json                    # Node deps (Playwright)
-├── package-lock.json
-├── playwright.config.ts            # Playwright config — CI-friendly defaults
-├── validate-test.js                # Local test runner for auto-heal
-├── .env.example                    # Local-dev template (CI uses GitHub secrets)
-├── README.md
-├── TEST_CASE_DESCRIPTIONS.md       # Sample prompts for the Synthesize tab
-└── tests/                          # Auto-generated in CI from golden/ (gitignored)
+│   ├── server.py                  # FastAPI backend
+│   ├── static/index.html          # Full UI — no build step
+│   ├── golden/                    # Source-of-truth test scripts (committed)
+│   ├── explorations/              # Exploration run reports (gitignored)
+│   ├── .auth/                     # Saved browser sessions (gitignored)
+│   ├── selector_memory.json       # Learned selectors across runs (committed)
+│   ├── exploration_patterns.json  # Learned interaction patterns (committed)
+│   └── learned_rules.json         # Learned healing rules (committed)
+├── scripts/
+│   ├── auth.ts                    # One-time auth session recorder
+│   └── smoke_explore.py           # CLI smoke test for the explorer pipeline
+├── ci/
+│   ├── export_goldens.py          # golden/*.json → tests/*.spec.ts
+│   └── report_run.py              # Playwright results → POST /api/runs
+├── .github/workflows/playwright.yml
+└── playwright.config.ts
 ```
 
 ---
 
-## Troubleshooting (CI)
+## Troubleshooting
 
-**`no goldens exported — nothing to test`**
-The `golden/` directory is empty (or only has malformed JSON). Commit at least one valid golden to the repository.
+**Server not starting** — make sure you're using `python3 -m uvicorn server:app` from the `studio/` directory with the venv active.
 
-**`Executable doesn't exist at ...ms-edge`**
-Edge channel needs a one-time install. The workflow already runs `npx playwright install --with-deps msedge` — make sure you didn't remove it.
+**Auth session expired** — re-run `npx ts-node scripts/auth.ts` to record a fresh session.
 
-**`report-runs` job never runs**
-That job is gated by the `PLAYWRIGHT_AI_STUDIO_URL` repository **variable** (not secret). Add it under Settings → Secrets and variables → Actions → Variables tab. Variables added on a fork won't be available until the workflow runs from the base repo.
+**Step keeps failing at navigation** — use ✨ Enrich Steps first. SAP Fiori and similar apps require explicit menu-opening steps before clicking a navigation item; the enrichment adds these automatically.
 
-**`Resource not accessible by integration` on the JUnit summary step**
-The `mikepenz/action-junit-report` action needs `checks: write` permission. If you've tightened the default `GITHUB_TOKEN` permissions, add this to the workflow:
-```yaml
-permissions:
-  contents: read
-  checks: write
-```
+**Exploration produces 0 steps** — check that the server can reach the app URL and the auth session is valid.
 
-**HTTP 502 from the FastAPI server in CI**
-Only happens if you've enabled the optional Azure-OpenAI-in-CI path. Confirm the four `AZURE_OPENAI_*` secrets/variables are set correctly.
+**CI: `no goldens exported`** — the `golden/` directory is empty or contains malformed JSON. Save at least one golden from the Explore tab and sync it to GitHub.
