@@ -884,7 +884,6 @@ Return ONLY a JSON array (empty array if nothing worth saving):
   "anti_pattern": "what to avoid (optional, omit if none)",
   "confidence": 0.5-1.0}}]""",
             max_tokens=800,
-            temperature=0,
         )
         raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
         new_patterns: list = json.loads(raw)

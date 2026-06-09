@@ -1,0 +1,48 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+studio/.venv/
+studio/__pycache__/
+studio/**/__pycache__/
+studio/**/*.pyc
+studio/**/*.pyo
+
+# ── Runtime data (re-created at startup or mounted from Azure File Share) ─────
+studio/explorations/
+studio/logs/
+studio/runs/
+studio/healing_history/
+studio/.playwright-mcp/
+
+# ── Auth sessions (never bake credentials into the image) ─────────────────────
+studio/.auth/
+
+# ── Node (test runner — not needed in the server image) ──────────────────────
+node_modules/
+npm-debug.log*
+
+# ── Test artefacts ────────────────────────────────────────────────────────────
+tests/
+test-results/
+playwright-report/
+results.json
+junit.xml
+.last-run.json
+
+# ── Dev / OS noise ────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── CI / deploy scripts (not needed at runtime) ──────────────────────────────
+.github/
+ci/
+deploy/provision.sh
+scripts/

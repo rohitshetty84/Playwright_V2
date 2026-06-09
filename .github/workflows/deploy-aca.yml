@@ -1,0 +1,80 @@
+# ── Playwright AI Studio — Deploy to Azure Container Apps ─────────────────────
+#
+# Triggers:
+#   • Push to main that touches studio/ or deploy/  → build + deploy
+#   • Manual run from Actions tab (any branch)
+#
+# Required GitHub secrets (set once after running deploy/provision.sh):
+#   AZURE_CREDENTIALS      — service principal JSON from provision.sh output
+#   ACR_LOGIN_SERVER       — e.g. acrplaywrightmcp.azurecr.io
+#   ACR_USERNAME           — ACR admin username
+#   ACR_PASSWORD           — ACR admin password  (mark as secret)
+#   ACA_RESOURCE_GROUP     — rg-playwright-mcp
+#   ACA_APP_NAME           — ca-playwright-studio
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Deploy to Azure Container Apps
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "studio/**"
+      - "deploy/**"
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: "Force deploy even if no studio/ changes"
+        type: boolean
+        default: false
+
+env:
+  IMAGE_NAME: playwright-studio
+
+jobs:
+  build-and-deploy:
+    name: Build → Push → Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Azure login ───────────────────────────────────────────────────────
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── 3. Build image in Azure (no Docker runner needed) ───────────────────
+      - name: Build image via az acr build
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          az acr build \
+            --registry $(echo "${{ secrets.ACR_LOGIN_SERVER }}" | cut -d. -f1) \
+            --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+            --image ${{ env.IMAGE_NAME }}:latest \
+            --image ${{ env.IMAGE_NAME }}:${SHORT_SHA} \
+            --file deploy/Dockerfile \
+            .
+
+      # ── 4. Deploy to Container App ───────────────────────────────────────────
+      - name: Deploy to Azure Container Apps
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          resourceGroup: ${{ secrets.ACA_RESOURCE_GROUP }}
+          containerAppName: ${{ secrets.ACA_APP_NAME }}
+          imageToDeploy: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+
+      # ── 7. Print the app URL ─────────────────────────────────────────────────
+      - name: Get app URL
+        run: |
+          URL=$(az containerapp show \
+            --name ${{ secrets.ACA_APP_NAME }} \
+            --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "### Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "**URL**: https://$URL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image**: \`${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
