@@ -9,13 +9,13 @@ from collections import defaultdict
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mK]')
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 import requests
 from playwright.async_api import async_playwright
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import AzureOpenAI
@@ -30,6 +30,7 @@ from services import prompts  # noqa: F401 — referenced by string-name in futu
 from services.assertions import evaluate as evaluate_assertions  # P1-5
 from services.git_sync import sync_goldens as _sync_goldens_service  # P2-2
 from services.vision_policy import decide as decide_vision, log_decision  # P2-3
+from services.mcp_bridge import PlaywrightMCPBridge  # MCP: Playwright MCP bridge
 
 # ── Configure Logging ──────────────────────────────────────────────────────────
 BASE = Path(__file__).parent
@@ -164,7 +165,14 @@ RUNS_DIR.mkdir(exist_ok=True)
 HEALING_DIR.mkdir(exist_ok=True)
 EXPLORATIONS_DIR    = BASE / "explorations"
 SELECTOR_MEMORY_FILE = BASE / "selector_memory.json"
+LEARNED_RULES_FILE   = BASE / "learned_rules.json"
 EXPLORATIONS_DIR.mkdir(exist_ok=True)
+
+# Live SSE queues — one asyncio.Queue per active exploration
+_explore_queues: dict = {}
+
+# Cancellation flags — set to signal a running exploration to stop cleanly
+_explore_cancel: dict = {}   # exploration_id → asyncio.Event
 
 # ── Synthesis tuning ─────────────────────────────────────────────────────────
 MAX_HEAL_ROUNDS    = 3    # Max Phase-1/2 retry cycles before giving up
@@ -212,10 +220,16 @@ class ExploreRequest(BaseModel):
     test_case: str
     storage_state: Optional[str] = None   # e.g. "successfactors" → studio/.auth/successfactors.json
     max_steps: int = 30
+    headless: bool = True                 # True = background (no visible window)
+    max_restarts: int = 0                 # full-run retries on cascade failure (0 = none)
 
 class GenerateFromExplorationRequest(BaseModel):
     exploration_id: str
     md_content: str                        # possibly user-edited before generation
+
+class EnrichStepsRequest(BaseModel):
+    test_case: str
+    app_context: str = "SAP SuccessFactors Onboarding 2.0"   # e.g. "SAP SuccessFactors", "Workday", custom text
 # ── Azure OpenAI helper ───────────────────────────────────────────────────────
 # Legacy wrapper, now thin: delegates to LLMService + retry, and sanitises
 # error responses (P2-4) so we don't leak full Azure exception strings.
@@ -492,6 +506,142 @@ def _load_selector_memory() -> dict:
 def _save_selector_memory(memory: dict) -> None:
     SELECTOR_MEMORY_FILE.write_text(json.dumps(memory, indent=2, default=str))
 
+
+# ── Self-learning rule store ──────────────────────────────────────────────────
+# Rules are extracted by the reasoning model after each failure or successful
+# correction, persisted to learned_rules.json, and injected into every
+# subsequent step prompt — both within the same run and across future runs.
+
+def _load_learned_rules() -> dict:
+    if LEARNED_RULES_FILE.exists():
+        try:
+            return json.loads(LEARNED_RULES_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_learned_rules(data: dict) -> None:
+    LEARNED_RULES_FILE.write_text(json.dumps(data, indent=2, default=str))
+
+def _persist_learned_rule(rule: dict, framework: str) -> bool:
+    """Add a rule to the store. Returns True if accepted (not a dupe, confidence OK)."""
+    if not rule or rule.get("confidence", 0) < 0.65:
+        return False
+    data = _load_learned_rules()
+    bucket = data.setdefault(framework, [])
+    sig = rule.get("error_signature", "").strip().lower()
+    if sig and any(r.get("error_signature", "").strip().lower() == sig for r in bucket):
+        return False   # already know this pattern
+    if len(bucket) >= 30:
+        bucket.pop(0)  # drop oldest when cap reached
+    bucket.append({
+        "rule":            rule.get("rule", ""),
+        "anti_pattern":    rule.get("anti_pattern", ""),
+        "error_signature": rule.get("error_signature", ""),
+        "applies_to":      framework,
+        "confidence":      rule.get("confidence", 0),
+        "source":          rule.get("source", ""),
+        "created":         datetime.now().isoformat(),
+        "applied_count":   0,
+    })
+    _save_learned_rules(data)
+    return True
+
+def _get_active_rules(framework: str) -> list:
+    """Return rule strings for the given framework, best-confidence first."""
+    data = _load_learned_rules()
+    rules = [r for r in data.get(framework, []) if r.get("confidence", 0) >= 0.65]
+    rules.sort(key=lambda r: r.get("confidence", 0), reverse=True)
+    return [r["rule"] for r in rules]
+
+def _extract_rule_from_failure(step_desc: str, attempts: list,
+                                ui_framework: str, exploration_id: str) -> dict:
+    """Ask the reasoning model to derive a reusable rule from a multi-attempt failure."""
+    if not attempts:
+        return {}
+    attempts_text = "\n".join(
+        f"  Attempt {i+1}: action={a.get('action','')}  "
+        f"selector='{a.get('selector','')}'"
+        f"  error='{a.get('error','')[:150]}'"
+        for i, a in enumerate(attempts)
+    )
+    try:
+        raw = ask_llm(
+            system=(
+                "You are a Playwright selector expert analysing browser automation failures. "
+                "Extract ONE concise, reusable rule to prevent this failure from recurring."
+            ),
+            user=f"""A step FAILED after all retries.
+
+STEP: {step_desc}
+UI FRAMEWORK: {ui_framework}
+
+ALL ATTEMPTS (all failed):
+{attempts_text}
+
+Rules:
+- The rule must describe locator STRINGS (e.g. 'ui5-table-row:has-text("X") >> ui5-table-cell:nth-child(N)')
+- NEVER recommend TypeScript method calls (page.getByRole(...), .filter({{...}}), etc.)
+- Be specific — name the component type and the correct string pattern
+
+Return ONLY raw JSON, no markdown:
+{{
+  "rule": "one sentence: use <correct locator string> instead of <wrong pattern> because <reason>",
+  "anti_pattern": "the pattern that caused the failure",
+  "error_signature": "key phrase from the error that identifies this failure class",
+  "confidence": 0.0-1.0
+}}""",
+            max_tokens=300,
+            temperature=0,
+        )
+        raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
+        result = json.loads(raw)
+        result["source"] = exploration_id
+        return result
+    except Exception as e:
+        logger.warning(f"[EXPLORE {exploration_id}] Rule extraction (failure) error: {e}")
+        return {}
+
+def _extract_rule_from_correction(step_desc: str, failed_selector: str,
+                                   failed_error: str, working_selector: str,
+                                   ui_framework: str, exploration_id: str) -> dict:
+    """Extract a rule when a retry succeeds after prior attempts failed."""
+    try:
+        raw = ask_llm(
+            system=(
+                "You are a Playwright selector expert. "
+                "Extract ONE reusable rule from a successful selector correction."
+            ),
+            user=f"""A step FAILED then SUCCEEDED on retry.
+
+STEP: {step_desc}
+UI FRAMEWORK: {ui_framework}
+
+FAILED selector:  '{failed_selector}'
+FAILURE error:    '{failed_error[:200]}'
+WORKING selector: '{working_selector}'
+
+Write ONE concise rule: prefer the working locator string pattern, avoid the failing one.
+Must describe STRINGS not TypeScript code.
+
+Return ONLY raw JSON, no markdown:
+{{
+  "rule": "use '<working pattern>' instead of '<failed pattern>' because <reason>",
+  "anti_pattern": "{failed_selector}",
+  "error_signature": "key phrase from the error",
+  "confidence": 0.0-1.0
+}}""",
+            max_tokens=250,
+            temperature=0,
+        )
+        raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
+        result = json.loads(raw)
+        result["source"] = exploration_id
+        return result
+    except Exception as e:
+        logger.warning(f"[EXPLORE {exploration_id}] Rule extraction (correction) error: {e}")
+        return {}
+
 def _intent_keywords(text: str) -> set:
     """Extract meaningful keywords from a step description for fuzzy matching."""
     stop = {
@@ -512,12 +662,20 @@ def _intent_similarity(a: str, b: str) -> float:
 
 def _find_memory_hints(domain: str, step_desc: str,
                        min_similarity: float = 0.35) -> list:
-    """Return past verified selectors for similar steps on this domain, best first."""
+    """Return past verified selectors for similar steps on this domain, best first.
+
+    Only returns entries where successes outweigh failures — stale/bad selectors
+    that accumulated failures are excluded so the model isn't misled.
+    """
     memory = _load_selector_memory()
     entries = memory.get(domain, {}).get("entries", [])
     hits = []
     for e in entries:
-        if e.get("success_count", 0) == 0:
+        sc = e.get("success_count", 0)
+        fc = e.get("failure_count", 0)
+        if sc == 0:
+            continue
+        if fc >= sc:          # more failures than successes → exclude
             continue
         sim = _intent_similarity(step_desc, e.get("step_intent", ""))
         if sim >= min_similarity:
@@ -579,9 +737,16 @@ def _record_selector_outcome(domain: str, step_desc: str, action: str,
 def _parse_test_steps(test_case: str) -> list:
     """Use LLM to break a free-text description into a flat ordered step list."""
     raw = ask_llm(
-        system="""You are a test planning assistant.
-Break the test description into a flat ordered list of atomic steps.
-For conditional paths (Path A / Path B / If X then Y) include ALL path steps tagged with their path label.
+        system="""You are a test planning assistant for browser automation.
+Break the test description into a flat ordered list of ATOMIC steps — one interaction per step.
+Key rules:
+- If navigating to a section requires opening a menu first, split into TWO steps:
+    e.g. "Go to Onboarding Dashboard" → step 1: "Click the Home/Apps icon to open the navigation menu"
+                                       → step 2: "Click 'Onboarding' from the menu options"
+- Search with typeahead also needs TWO steps:
+    step 1: "Type candidate name into the search input"
+    step 2: "Click the matching suggestion from the dropdown that appears"
+- For conditional paths (Path A / Path B) include ALL path steps tagged with their path label.
 Return ONLY a JSON array — no markdown fences, no explanation.
 Schema: [{"id":1,"description":"...","type":"navigate|interact|read|conditional|assert","path":"A|B|both"}]""",
         user=test_case,
@@ -839,6 +1004,13 @@ test.describe('Page Test', () => {{
         if pb:
             await pb.stop()
 
+_SAP_DOMAIN_HINTS = ("successfactors.com", "sap.com", "onboarding", "successfactors")
+
+def _is_sap_test(test_case: str) -> bool:
+    """Return True when the test description targets a SuccessFactors / SAP UI5 app."""
+    lower = test_case.lower()
+    return any(h in lower for h in _SAP_DOMAIN_HINTS)
+
 # ─ NEW: Enhanced Synthesis with Local Validation ─────────────────────────────
 @app.post("/api/synthesize/with-validation")
 async def synthesize_with_validation(req: SynthesizeRequest):
@@ -878,6 +1050,8 @@ async def synthesize_with_validation(req: SynthesizeRequest):
         log_json_result(0, "IN_PROGRESS", "Synthesizing with vision", {})
 
         url = None   # may be set by Phase 0 or the fallback; used by Phase 2 screenshots
+        _sap = _is_sap_test(req.test_case)
+        _sap_rules = f"\n\n{prompts.SAP_UI5_SELECTOR_RULES}" if _sap else ""
 
         try:
             # Extract URL from test description (full https:// URLs only)
@@ -961,7 +1135,7 @@ SELECTOR RULES (in order of preference):
 2. For buttons: getByRole('button', {{ name: '...' }})
 3. For links with href: page.locator('a[href*="keyword"]')
 4. For text content: getByText('...', {{ exact: true }})
-5. Avoid getByRole('link') for navigation tabs — it breaks on sites that use role="menuitem".
+5. Avoid getByRole('link') for navigation tabs — it breaks on sites that use role="menuitem".{_sap_rules}
 
 AUTHENTICATION RULES (must follow — security requirement):
 - NEVER hardcode usernames, passwords, or any credentials in the test code.
@@ -1043,7 +1217,7 @@ SELECTOR RULES (in order of preference):
 2. For buttons: getByRole('button', {{ name: '...' }})
 3. For links with href: page.locator('a[href*="keyword"]')
 4. For text content: getByText('...', {{ exact: true }})
-5. Avoid getByRole('link') for navigation tabs.
+5. Avoid getByRole('link') for navigation tabs.{_sap_rules}
 
 AUTHENTICATION RULES (must follow — security requirement):
 - NEVER hardcode usernames, passwords, or any credentials in the test code.
@@ -1192,6 +1366,7 @@ Output ONLY the code, no markdown or explanations."""
                 # Fall back to navigating to url only when no failure screenshot
                 # is available (older test-results dir, screenshot disabled, etc.).
                 heal_shot_b64 = failure_shot_b64
+                heal_dom_info = ""   # live DOM inspection result for this round
 
                 if heal_shot_b64:
                     logger.info(
@@ -1208,6 +1383,18 @@ Output ONLY the code, no markdown or explanations."""
                     pb2      = await async_playwright().start()
                     browser2 = await pb2.chromium.launch()
                     page2    = await browser2.new_page()
+                    # Load auth if available for this URL
+                    for _dom, _aname in _DOMAIN_AUTH_MAP.items() if hasattr(locals(), '_DOMAIN_AUTH_MAP') else []:
+                        if _dom in (url or ""):
+                            _ap = BASE / ".auth" / f"{_aname}.json"
+                            if _ap.exists():
+                                await browser2.close()
+                                await pb2.stop()
+                                pb2      = await async_playwright().start()
+                                browser2 = await pb2.chromium.launch()
+                                ctx2     = await browser2.new_context(storage_state=str(_ap))
+                                page2    = await ctx2.new_page()
+                            break
                     for _w, _t in [('domcontentloaded', 30000), ('load', 30000), ('commit', 45000)]:
                         try:
                             await page2.goto(url, wait_until=_w, timeout=_t)
@@ -1217,6 +1404,14 @@ Output ONLY the code, no markdown or explanations."""
                     await page2.wait_for_timeout(2000)
                     heal_shot_bytes = await page2.screenshot(full_page=False)
                     heal_shot_b64   = base64.b64encode(heal_shot_bytes).decode('utf-8')
+                    # Run DOM inspection while browser is still open
+                    try:
+                        _failed_sel = re.search(r"locator\(['\"](.+?)['\"]\)", phase1_message)
+                        _sel_hint   = _failed_sel.group(1) if _failed_sel else ""
+                        heal_dom_info = await _inspect_dom_for_correction(page2, _sel_hint, phase1_message[:200])
+                        logger.info(f"[PHASE 2 · Round {round_num}] 🔬 DOM inspected for heal")
+                    except Exception as _de:
+                        logger.warning(f"[PHASE 2 · Round {round_num}] DOM inspection skipped: {_de}")
                     await browser2.close()
                     await pb2.stop()
 
@@ -1232,6 +1427,8 @@ Output ONLY the code, no markdown or explanations."""
                     )
                     round_entry["screenshot_for_heal"] = False
 
+                _dom_heal_block = f"\n{heal_dom_info}\n" if heal_dom_info else ""
+
                 heal_text = f"""This Playwright test failed (Round {round_num} of {MAX_HEAL_ROUNDS}).
 {"Look at the screenshot to identify the correct element, then fix the test." if heal_shot_b64 else "Analyse the error and fix the test code."}
 
@@ -1240,13 +1437,13 @@ FAILURE ERROR:
 
 CURRENT BROKEN CODE:
 {current_code}
-
+{_dom_heal_block}
 SELECTOR RULES (use in this order):
 1. Nav tabs/menu items → page.locator('a[role="menuitem"]').filter({{hasText: "Label"}})
 2. Buttons            → getByRole('button', {{ name: '...' }})
 3. Links with href    → page.locator('a[href*="keyword"]')
 4. Plain text         → getByText('...', {{ exact: true }})
-❌ NEVER use getByRole('link') for navigation tabs — those elements use role="menuitem".
+❌ NEVER use getByRole('link') for navigation tabs — those elements use role="menuitem".{_sap_rules}
 
 AUTHENTICATION RULES (must preserve — security requirement):
 - If the existing code has a test.use({{ storageState: ... }}) line, keep it exactly as-is.
@@ -1254,6 +1451,7 @@ AUTHENTICATION RULES (must preserve — security requirement):
 - NEVER introduce usernames or passwords anywhere in the code.
 
 {"Study the screenshot carefully. Identify the exact element the test is trying to reach." if heal_shot_b64 else ""}
+{"Use the DOM inspection above as primary evidence for the correct selector." if heal_dom_info else ""}
 Fix only the broken selector/action. Keep all other test logic unchanged.
 Output ONLY the corrected TypeScript code. No markdown fences."""
 
@@ -1610,6 +1808,96 @@ async def sync_goldens_to_github():
     if not sync["pushed"] and sync["error"]:
         raise HTTPException(status_code=500, detail=sync["error"])
     return {"synced": sync["pushed"], "message": sync.get("output") or "Nothing new to push"}
+
+@app.get("/api/runs/sync-from-github")
+async def sync_runs_from_github():
+    """
+    Pull recent GitHub Actions workflow runs and write any completed ones
+    to the local runs store. Idempotent — uses github_run_id to deduplicate.
+    Called when the user opens Run History or checks a workflow status.
+    """
+    try:
+        gh_token, gh_owner, gh_repo, gh_workflow, gh_branch = get_github_config()
+    except HTTPException:
+        return {"imported": 0, "message": "GitHub not configured"}
+
+    headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+    url = f"https://api.github.com/repos/{gh_owner}/{gh_repo}/actions/workflows/{gh_workflow}/runs"
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=10, params={"per_page": 30})
+        if resp.status_code != 200:
+            return {"imported": 0, "message": f"GitHub API {resp.status_code}: {resp.text[:100]}"}
+    except Exception as e:
+        return {"imported": 0, "message": f"GitHub request failed: {e}"}
+
+    workflow_runs = resp.json().get("workflow_runs", [])
+
+    # Build set of already-recorded github_run_ids so we don't duplicate
+    existing_ids = {
+        r.get("githubRunId") for r in load_runs() if r.get("githubRunId")
+    }
+
+    goldens_by_id = {g["id"]: g for g in load_goldens()}
+    imported = 0
+
+    for wr in workflow_runs:
+        if wr.get("status") != "completed":
+            continue  # skip in-progress runs
+
+        github_run_id = str(wr["id"])
+        if github_run_id in existing_ids:
+            continue  # already recorded
+
+        # Try to map back to a golden via workflow inputs or display_title
+        inputs = wr.get("inputs") or {}
+        golden_id = inputs.get("golden_id", "")
+        display_title = wr.get("display_title", "") or wr.get("name", "")
+
+        # display_title often contains "Add golden: filename.spec.ts [abc12345]"
+        # or "Run golden: filename.spec.ts" — extract what we can
+        if not golden_id:
+            id_match = re.search(r'\[([a-f0-9]{6,10})\]', display_title)
+            if id_match:
+                golden_id = id_match.group(1)
+
+        golden = goldens_by_id.get(golden_id)
+        if golden:
+            golden_name = golden["name"]
+        elif inputs.get("golden_name"):
+            golden_name = inputs["golden_name"]
+        else:
+            # Use display_title stripped of the ID bracket as the name
+            golden_name = re.sub(r'\s*\[[a-f0-9]{6,10}\]', '', display_title).strip() or "CI Run"
+
+        conclusion = wr.get("conclusion", "unknown")  # success / failure / cancelled
+        status_val = "pass" if conclusion == "success" else "fail"
+
+        rid = str(uuid.uuid4())[:8]
+        run = {
+            "id":           rid,
+            "goldenId":     golden_id,
+            "goldenName":   golden_name,
+            "browser":      "chromium",
+            "runAt":        wr.get("created_at", ts_now())[:16].replace("T", " "),
+            "githubRunId":  github_run_id,
+            "githubRunUrl": wr.get("html_url", ""),
+            "githubRunNum": wr.get("run_number"),
+            "conclusion":   conclusion,
+            "candidates": [{
+                "name":     golden_name,
+                "path":     golden_id,
+                "status":   status_val,
+                "duration": 0,
+                "error":    "" if status_val == "pass" else f"CI run #{wr.get('run_number')} {conclusion}",
+            }],
+        }
+        save_json(RUNS_DIR, rid, run)
+        existing_ids.add(github_run_id)
+        imported += 1
+
+    return {"imported": imported, "message": f"Imported {imported} new run(s) from GitHub Actions"}
+
 
 # ─ Record a test run ──────────────────────────────────────────────────────────
 @app.post("/api/runs")
@@ -2191,7 +2479,7 @@ async def get_workflow_status(golden_id: str):
         url = f"https://api.github.com/repos/{gh_owner}/{gh_repo}/actions/workflows/{gh_workflow}/runs"
         headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
 
-        response = requests.get(url, headers=headers, timeout=10, params={"per_page": 10})
+        response = requests.get(url, headers=headers, timeout=10, params={"per_page": 30})
 
         if response.status_code != 200:
             raise HTTPException(
@@ -2201,20 +2489,33 @@ async def get_workflow_status(golden_id: str):
 
         runs = response.json().get("workflow_runs", [])
 
-        # Find run for this golden_id by checking workflow inputs
+        # Match by inputs.golden_id first, then fall back to display_title containing the ID.
+        # GitHub often returns inputs=null even when they were provided, so the title fallback
+        # is the primary match path in practice.
         matching_run = None
         for run in runs:
-            inputs = run.get("inputs", {})
-            if inputs.get("golden_id") == golden_id:
+            inputs = run.get("inputs") or {}
+            display_title = run.get("display_title", "") or ""
+            if (inputs.get("golden_id") == golden_id or
+                    golden_id in display_title or
+                    f"[{golden_id}]" in display_title):
                 matching_run = run
                 break
 
         if not matching_run:
-            return {
-                "status": "not_found",
-                "message": "No workflow run found for this golden",
-                "golden_id": golden_id,
-            }
+            # No golden-specific match — return the most recent run as a fallback.
+            # Runs triggered via "Run in CI" button have no golden ID in their title.
+            if runs:
+                matching_run = runs[0]
+                fallback = True
+            else:
+                return {
+                    "status": "not_found",
+                    "message": "No workflow runs found in this repository",
+                    "golden_id": golden_id,
+                }
+        else:
+            fallback = False
 
         return {
             "status": "found",
@@ -2222,13 +2523,14 @@ async def get_workflow_status(golden_id: str):
             "run_id": matching_run["id"],
             "run_number": matching_run["run_number"],
             "name": matching_run["name"],
-            "conclusion": matching_run.get("conclusion"),  # null=running, success/failure
-            "status": matching_run["status"],  # queued, in_progress, completed
+            "conclusion": matching_run.get("conclusion"),
+            "workflow_status": matching_run["status"],
             "created_at": matching_run["created_at"],
             "updated_at": matching_run["updated_at"],
             "html_url": matching_run["html_url"],
             "github_link": matching_run["html_url"],
             "display_title": matching_run.get("display_title", matching_run["name"]),
+            "fallback": fallback,
         }
     except requests.Timeout:
         raise HTTPException(status_code=504, detail="GitHub API timeout")
@@ -2242,6 +2544,11 @@ async def get_workflow_status(golden_id: str):
 
 # ── Verify-then-act helpers ───────────────────────────────────────────────────
 
+# ── [PLAYWRIGHT-CLI] ─────────────────────────────────────────────────────────
+# _gpt_vision_json / _reasoning_vision_json: single-shot GPT-4V helpers used by
+# the direct Playwright step loop (plan → execute → verify). Not called in MCP
+# mode — the Azure OpenAI function-calling loop handles reasoning internally.
+# ─────────────────────────────────────────────────────────────────────────────
 def _gpt_vision_json(shot_b64: str, prompt: str) -> dict:
     """Single GPT-4V call (main model) — used for verification / screenshot comparison."""
     content = (
@@ -2288,8 +2595,364 @@ def _reasoning_vision_json(shot_b64: str, prompt: str) -> dict:
     return json.loads(raw)
 
 
+# ── [PLAYWRIGHT-CLI] ─────────────────────────────────────────────────────────
+# _get_accessibility_tree: reads the a11y tree from a live Playwright `page`
+# object. In MCP mode, browser_snapshot() returns the same information via the
+# MCP server — no `page` object exists. Kept for reference.
+# ─────────────────────────────────────────────────────────────────────────────
+async def _get_accessibility_tree(page, max_chars: int = 4000) -> str:
+    """Return a condensed accessibility tree for the current page state.
+
+    Pierces shadow DOM (critical for SAP UI5 web components) and returns
+    interactive elements with their roles and labels so the LLM reasons from
+    actual DOM structure rather than guessing from pixels.
+    """
+    try:
+        snapshot = await page.accessibility.snapshot(interesting_only=True)
+        if not snapshot:
+            return ""
+
+        lines: list = []
+
+        def walk(node: dict, depth: int = 0) -> None:
+            if depth > 6 or len(lines) > 200:
+                return
+            role  = node.get("role", "")
+            name  = (node.get("name") or "").strip()[:80]
+            value = (str(node.get("value") or "")).strip()[:40]
+            if role and name:
+                indent = "  " * depth
+                entry  = f"{indent}[{role}] \"{name}\""
+                if value:
+                    entry += f' = "{value}"'
+                lines.append(entry)
+            for child in node.get("children", []):
+                walk(child, depth + 1)
+
+        walk(snapshot)
+        result = "\n".join(lines)
+        if len(result) > max_chars:
+            result = result[:max_chars] + "\n… (truncated)"
+        return result
+    except Exception:
+        return ""
+
+
+# ── [PLAYWRIGHT-CLI] ─────────────────────────────────────────────────────────
+# _detect_ui_framework: takes a direct Playwright `page` object. In MCP mode,
+# _detect_ui_framework_mcp() (defined below) does the same via browser_evaluate.
+# ─────────────────────────────────────────────────────────────────────────────
+async def _detect_ui_framework(page) -> str:
+    """Detect SAP UI5 or other known frameworks by checking URL then live DOM.
+
+    URL check runs first so detection works during SSO redirects before any
+    ui5-* elements have rendered (e.g. SAML handshake pages).
+    """
+    try:
+        current_url = page.url or ""
+        if any(d in current_url for d in ("successfactors.com", "sap.com", "onboarding2",
+                                           "performancemanager", "plateau.com")):
+            return "sap_ui5"
+    except Exception:
+        pass
+    # Fall back to DOM inspection once the page has rendered
+    try:
+        has_ui5 = await page.evaluate(
+            "() => !!(document.querySelector('ui5-button,ui5-dialog,ui5-input,[data-sap-ui]'))"
+        )
+        if has_ui5:
+            return "sap_ui5"
+    except Exception:
+        pass
+    return "standard"
+
+
+def _is_dependent_step(failed_step: str, next_step: str) -> bool:
+    """Ask the LLM whether `next_step` requires `failed_step` to have succeeded."""
+    try:
+        raw = ask_llm(
+            system="You decide if a test step depends on a previous step succeeding.",
+            user=(
+                f"FAILED STEP: {failed_step}\n"
+                f"NEXT STEP: {next_step}\n\n"
+                "Does the next step REQUIRE the failed step to have succeeded to be meaningful? "
+                "Return ONLY raw JSON (no markdown): "
+                "{\"dependent\": true|false, \"reason\": \"one sentence\"}"
+            ),
+            max_tokens=120,
+        )
+        raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
+        return json.loads(raw).get("dependent", False)
+    except Exception:
+        return False
+
+
+_SAP_UI5_RULES = """
+SAP UI5 / SUCCESSFACTORS FRAMEWORK RULES
+This page uses SAP UI5 web components (Onboarding 2.0+). All rules below are mandatory.
+
+── CORE WEB COMPONENT RULES ──────────────────────────────────────────────────
+- NEVER target shadow-DOM internals: .ui5-button-root, .ui5-input-inner, .ui5-*
+  Always target the OUTER component element.
+- NEVER use dynamic IDs like __button0-__clone42 — they change every session/user/deploy.
+  Always use accessible name, placeholder, or component tag instead.
+
+── COMPONENT SELECTORS ───────────────────────────────────────────────────────
+- Buttons:     ui5-button[accessible-name="Label"]  OR  ui5-button:has-text("Label")
+- Inputs:      PREFER input[placeholder="..."] — Playwright pierces shadow DOM and .fill() works reliably.
+               Only fall back to ui5-input[placeholder="..."] if the plain input selector times out AND
+               you have confirmed the element is visible. NEVER switch to ui5-input just because of a timeout —
+               timeouts mean the page is not ready, not that the selector is wrong.
+- Dropdowns:   ui5-select — page.locator('ui5-select').select_option(value)
+- Dialogs:     ui5-dialog — close with Escape  OR  ui5-dialog >> ui5-button[icon="decline"]
+- Date fields: ui5-date-picker >> input  (fill the inner input here, exception to the rule)
+- Checkboxes:  ui5-checkbox[accessible-name="..."] — use .check() / .uncheck()
+- Tabs:        ui5-tabcontainer >> ui5-tab[text="Tab Name"]
+- Wizard:      ui5-wizard-step — next/submit via ui5-button:has-text("Next")
+- Click fallback (resolves but won't click): page.evaluate('el => el.click()', await locator.elementHandle())
+
+── SF ONBOARDING KNOWN SELECTORS (use these exactly — proven across multiple runs) ──────────
+- Candidate search fill:    input[placeholder="Search for new recruit"]   ← plain CSS, pierces shadow DOM
+- Candidate suggestion:     role=option[name^="Candidate Name"]           ← starts-with, handles job title suffix
+- Home nav button:          role=button[name="Home"]  (may also appear as "My Employee File" on non-home pages)
+- Onboarding menu item:     role=menuitem[name="Onboarding"]  (only in accessibility tree if flyout renders — see NAVIGATION PATTERN if absent)
+- Apply filter / Go:        role=button[name="Go"]                        ← MUST click after selecting candidate
+
+CRITICAL — ONBOARDING DASHBOARD FILTER PATTERN (always follow this exact sequence):
+  1. fill    input[placeholder="Search for new recruit"]   with candidate name
+  2. click   role=option[name^="Candidate Name"]           typeahead suggestion
+  3. click   role=button[name="Go"]                        ← applies the filter (table still shows ALL if skipped)
+  4. wait_for  ui5-table-row                               wait for filtered results to render
+
+CRITICAL — ONBOARDING TABLE STRUCTURE (columns, not rows):
+The Onboarding dashboard table has ONE ROW PER CANDIDATE. Column layout:
+  nth-child(1): New Recruit name
+  nth-child(2): Hiring Manager
+  nth-child(3): Start Date
+  nth-child(4): Data Collection   ← status text e.g. "Completed", "In Progress"
+  nth-child(5): Compliance Forms  ← status text e.g. "Completed", "Not Available"
+  nth-child(6): New Recruit Tasks
+
+"Data Collection" and "Compliance Forms" are COLUMN HEADERS, NOT row text values.
+NEVER use ui5-table-row:has-text("Data Collection") — that row does not exist.
+
+After clicking "Go" and the table filters to the candidate, read statuses with:
+  Data Collection:   ui5-table-row >> ui5-table-cell:nth-child(4)
+  Compliance Forms:  ui5-table-row >> ui5-table-cell:nth-child(5)
+
+After navigating to the Onboarding dashboard, ALWAYS use action="wait_for" with
+selector="input[placeholder='Search for new recruit']" before attempting to fill it.
+The dashboard renders asynchronously and the field is not interactive for 3-10 seconds after navigation.
+
+── NAVIGATION PATTERN ────────────────────────────────────────────────────────
+SF module navigation follows this pattern — always use it in this order:
+  1. Click nav/home button: role=button[name="Home"]  (label may vary — also try "My Employee File")
+  2. Take a browser_take_screenshot to see the navigation flyout visually.
+  3. If role=menuitem[name="Onboarding"] appears in the accessibility tree → click it.
+     If it does NOT appear in the tree (SAP Fiori flyout renders visually but not in tree) →
+     try browser_evaluate to find and click it in the DOM directly:
+       {{"function": "() => {{ const clickable = Array.from(document.querySelectorAll('a, [role=\"menuitem\"], [role=\"option\"], button')); const el = clickable.find(e => e.offsetParent !== null && e.textContent.trim() === 'Onboarding'); if (el) {{ el.click(); return 'clicked ' + el.tagName + ':' + (el.getAttribute('role') || '') + ' href=' + (el.href || ''); }} const all = Array.from(document.querySelectorAll('*')).filter(e => e.offsetParent !== null && e.textContent.trim() === 'Onboarding'); if (all.length) {{ const innermost = all[all.length - 1]; const link = innermost.closest('a') || innermost.closest('[role=\"menuitem\"]') || innermost; link.click(); return 'fallback ' + link.tagName; }} return 'not found'; }}"}}
+     If that also returns 'not found', the flyout may need a moment — wait 1s then retry.
+  ⚠️  If the flyout closes between steps (step 2 opened it, step 3 must click from it):
+     First check if the flyout is still visible via browser_take_screenshot.
+     If not visible, click the Home button AGAIN to reopen it before clicking Onboarding.
+  4. Wait for module load: wait for the module's page heading, NOT networkidle
+
+IMPORTANT: The SAP Fiori navigation flyout frequently does NOT render in the accessibility tree.
+If you click Home and see no menu/menuitem in the snapshot, do NOT keep retrying snapshots.
+Take a browser_take_screenshot first to see the page visually, then use browser_evaluate to search the DOM.
+
+- NEVER use waitForLoadState('networkidle') — SF polls continuously and this never resolves.
+  Instead wait for a specific heading or landmark element to become visible.
+- After any navigation, take a browser_take_screenshot and wait for content to settle before acting.
+
+── TABLES (most common failure point) ────────────────────────────────────────
+UI5 tables render as <ui5-table-row> / <ui5-table-cell> — NEVER <tr>/<td>.
+
+UNDERSTAND THE TABLE STRUCTURE FIRST (before writing any selector):
+After selecting a candidate in SF Onboarding, the dashboard shows TASK ROWS such as:
+  "Data Collection", "Compliance Forms", "Personal Information" etc.
+The candidate name (e.g. "Matthew Moraga") appears in a PAGE HEADING, NOT in a table row.
+→ Filter rows by TASK NAME, not by candidate name.
+→ If the DOM inspection says "No row containing 'Matthew Moraga' found" — this is expected.
+  Look at the DOM inspection's "all row texts" to find the actual task names used as row identifiers.
+
+Valid selector strings for the "selector" JSON field:
+  Task row:        ui5-table-row:has-text("Data Collection")
+  Status cell:     ui5-table-row:has-text("Data Collection") >> ui5-table-cell:nth-child(2)
+  Badge in row:    ui5-table-row:has-text("Data Collection") >> ui5-badge
+  CSS role form:   [role="row"]:has-text("Data Collection") >> [role="cell"]:nth-child(2)
+
+❌ INVALID — these throw InvalidSelectorError:
+  role=row:has-text("...")       ← role= prefix cannot take :has-text() — always errors
+  role=gridcell:nth-child(N)    ← same problem — use [role="gridcell"]:nth-child(N) instead
+
+- Column index for nth-child is 1-based: nth-child(1) = first column.
+- NEVER use tr/td CSS selectors — they always time out on UI5 tables.
+- NEVER write page.getByRole(...).filter({...}) in the selector field — TypeScript code only.
+
+── STATUS / BADGE READING ────────────────────────────────────────────────────
+Onboarding task statuses (Data Collection, Compliance, etc.) render as badges or text:
+  Read badge:    row.locator('ui5-badge').textContent()  — returns e.g. "Completed"
+  Read text:     row.getByRole('cell').nth(N).textContent()
+  Common values: "Completed", "In Progress", "Not Started", "Overdue", "Pending"
+- If a cell has both an icon and text, .textContent() returns both — use .trim().
+
+── FILTER BAR ("Go" button) ──────────────────────────────────────────────────
+The SAP Fiori FilterBar always shows a "Standard" variant label — this is the
+CURRENT filter variant name, NOT an open dropdown or menu. Seeing "Standard"
+in a screenshot does NOT mean the Go button failed.
+
+How to click the Go button:
+  - Preferred: browser_click(element='Go button') or browser_click(element='role=button[name="Go"]')
+  - Alternative (if click doesn't register): browser_evaluate with querySelector('[aria-label="Go"], button[title="Go"], #go-button') + .click()
+
+After clicking Go:
+  - The TABLE rows update — wait for ui5-table-row elements to appear
+  - The "Standard" label remains visible (expected — this is the filter variant name)
+  - URL does NOT change (Go is an in-page filter, not a navigation)
+  ✅ Success evidence = table shows rows / content changed
+  ❌ NOT evidence of failure = "Standard" label visible, URL unchanged
+
+── BUSY / LOADING STATES ─────────────────────────────────────────────────────
+SF shows loading overlays; interacting before they clear causes random failures.
+  Wait for busy to clear: await expect(page.locator('ui5-busy-indicator')).toBeHidden({ timeout: 30000 })
+  Alternative:            wait for the target element to be visible — it won't appear until load is done.
+- After a typeahead selection or form submit, always insert action="wait" value="2000"
+  before the next read or click step.
+
+── TIMEOUT vs NOT-FOUND — critical distinction ────────────────────────────────
+"Timeout Xms exceeded" means the element EXISTS but is NOT YET VISIBLE. It is a timing issue.
+"Element not found" or "strict mode violation" means wrong selector.
+
+When you see a Timeout error:
+  ✅ Use action="wait_for", same selector, value="30000" — waits for element to become visible
+  ✅ Then on the next step, retry the original fill/click with the same selector
+  ❌ Do NOT switch to a different selector — that will also time out for the same reason
+  ❌ Do NOT use fixed action="wait" delays — wait for the specific element instead
+
+Example: fill on 'input[placeholder="Search for new recruit"]' timed out →
+  Correction: action="wait_for", selector="input[placeholder='Search for new recruit']", value="30000"
+
+── TOAST NOTIFICATIONS ───────────────────────────────────────────────────────
+SF shows ui5-toast messages after saves/submits. They auto-dismiss and should NOT be clicked.
+  If a toast blocks a click: await page.locator('ui5-toast').waitFor({ state: 'hidden', timeout: 10000 })
+
+── IFRAMES ───────────────────────────────────────────────────────────────────
+Some SF modules (classic Onboarding 1.0 remnants, some admin pages) embed content in iframes.
+  If a locator times out even though the element is visible in the screenshot:
+  1. Check for iframes: const frame = page.frameLocator('iframe[title*="..."]')
+  2. Run the locator inside the frame: frame.locator('...')
+  3. Do NOT cross frame boundaries in a single locator chain.
+
+── TYPEAHEAD / AUTOCOMPLETE SEARCH ──────────────────────────────────────────
+Fills a search field → a suggestion dropdown appears → you MUST click a suggestion.
+  REQUIRED SEQUENCE (do not skip the wait_for):
+    1. action="wait_for"  selector="input[placeholder='Search for new recruit']"  value="30000"
+       (waits for field to become interactive after async dashboard render)
+    2. action="fill"      selector="input[placeholder='Search for new recruit']"  value="Candidate Name"
+    3. action="click"     selector="role=option[name^='Candidate Name']"
+       (starts-with ^= handles job title appended to name in the suggestion)
+  NEVER press Enter or submit before clicking the dropdown suggestion — search won't execute.
+  NEVER switch the input selector to ui5-input or ui5-combobox if it times out —
+    a timeout here means the page is still loading, not that the selector is wrong.
+    Use wait_for with the SAME selector, then retry fill.
+
+── INPUT COMPONENT TYPES (critical — three different components, three different patterns) ──
+  ui5-input        Free-text input. Use .fill() directly on the component.
+  ui5-combobox     Type-and-select (single value). Fill → click the matching suggestion.
+  ui5-select       Pure dropdown, no typing. Use page.locator('ui5-select').selectOption(value).
+  ui5-multi-combobox  Multi-value token input. Fill each value → click suggestion → repeat.
+                      Read selected tokens:  page.locator('ui5-multi-combobox').locator('ui5-token').allTextContents()
+                      Remove a token:        token.locator('ui5-icon[name="decline"]').click()
+  NEVER call .fill() on ui5-select — it has no text field. NEVER call .selectOption() on ui5-input or ui5-combobox.
+
+── PAGINATION / LOAD MORE ────────────────────────────────────────────────────
+SF tables only render the first N rows. If a row is not found:
+  1. Check for a "More" button at the bottom: page.locator('ui5-button:has-text("More")')
+  2. Click it, then wait 2s, then retry the row lookup.
+  3. Repeat until the row is found OR no "More" button exists.
+  NEVER conclude a row is absent without first checking for and clicking "More".
+
+── VIRTUAL SCROLLING ────────────────────────────────────────────────────────
+SF uses virtual rendering — rows below the viewport are not in the DOM.
+  If a row locator times out: scroll the table container, then retry.
+    await page.locator('ui5-table').evaluate(el => el.scrollTop += 400);
+    await page.waitForTimeout(1000);
+  Use scrollIntoViewIfNeeded() on rows that are found but not clickable.
+
+── CONFIRMATION DIALOGS ──────────────────────────────────────────────────────
+Every destructive action (delete, withdraw, terminate, reassign) opens a ui5-dialog asking for confirmation.
+  Confirm: await page.locator('ui5-dialog').locator('ui5-button:has-text("Confirm")').click()
+  Cancel:  await page.locator('ui5-dialog').locator('ui5-button:has-text("Cancel")').click()
+  If a dialog blocks interaction but isn't a confirmation, close with Escape.
+  After confirming, wait for the dialog to disappear before reading results:
+    await expect(page.locator('ui5-dialog')).toBeHidden({ timeout: 10000 })
+
+── INLINE VALIDATION / FORM ERRORS ──────────────────────────────────────────
+When a form submit fails validation, SF shows ui5-message-strip (inline) or ui5-message-box (blocking).
+  Read inline error:   await page.locator('ui5-message-strip[design="Negative"]').textContent()
+  Read field error:    await page.locator('ui5-input[value-state="Error"]').getAttribute('value-state-message')
+  Dismiss message box: await page.locator('ui5-message-box').locator('ui5-button:has-text("Close")').click()
+  If a form submit does NOT navigate and shows no success signal → check for validation errors first.
+
+── READ-ONLY VS EDITABLE FIELDS ─────────────────────────────────────────────
+SF renders editable and display-only fields with different components:
+  Editable:   ui5-input, ui5-combobox, ui5-select, ui5-textarea — use .fill() / .selectOption()
+  Read-only:  ui5-text, plain <span>, or ui5-input[readonly] — use .textContent() to read, NEVER .fill()
+  Assert editable value:  await expect(page.locator('ui5-input[placeholder="..."]')).toHaveValue('expected')
+  Assert read-only value: await expect(page.locator('ui5-text')).toContainText('expected')
+  NEVER call .fill() on a read-only field — it throws; read it with .textContent() instead.
+
+── SHELL BAR (TOP NAVIGATION) ───────────────────────────────────────────────
+The SF top application bar is ui5-shellbar, not a generic <header> or <nav>.
+  Home/logo button:   page.locator('ui5-shellbar').locator('[slot="startButton"]')  OR  ui5-shellbar-item
+  Search:             page.locator('ui5-shellbar').locator('[slot="searchField"]')
+  Profile / avatar:   page.locator('ui5-shellbar').locator('ui5-avatar')
+  Notifications bell: page.locator('ui5-shellbar').locator('ui5-shellbar-item[icon="bell"]')
+  NEVER use page.locator('header') or page.locator('nav') to reach shell bar items.
+
+── POPOVERS / OVERFLOW MENUS ────────────────────────────────────────────────
+Action-column "..." or kebab menus in SF use ui5-popover + ui5-list — NOT the browser context menu.
+  Open menu:     await page.locator('ui5-button[icon="overflow"]').click()
+                 OR: await page.locator('ui5-button[icon="navigation-down-arrow"]').click()
+  Click action:  await page.locator('ui5-popover').locator('ui5-li:has-text("Edit")').click()
+  NEVER right-click to open these menus — they are triggered by a specific button click.
+
+── SPA ACTION COMPLETION (how to know an action succeeded) ──────────────────
+SF is a Single Page Application — URL often does NOT change after save/submit.
+  Success signals to look for (in order):
+    1. ui5-toast with success text:       await page.locator('ui5-toast').textContent()
+    2. ui5-message-strip[design="Positive"] appearing
+    3. A new section or panel becoming visible (e.g., a "record saved" confirmation area)
+    4. The dialog closing (ui5-dialog disappears)
+  NEVER use waitForNavigation or URL change as a success signal after form saves.
+
+── FILE UPLOAD ───────────────────────────────────────────────────────────────
+SF uses ui5-file-uploader for document attachments. Target the inner input, not the outer component.
+  await page.locator('ui5-file-uploader').locator('input[type="file"]').setInputFiles('/path/to/file')
+  NEVER call .setInputFiles() on the ui5-file-uploader element itself — it will throw.
+
+── SIDE NAVIGATION (ADMIN CENTER) ───────────────────────────────────────────
+The Admin Center uses ui5-side-navigation, not standard links.
+  Click a nav item:    await page.locator('ui5-side-navigation-item[text="Manage Users"]').click()
+  Click a sub-item:    await page.locator('ui5-side-navigation-sub-item[text="Import Users"]').click()
+  Expand a group:      await page.locator('ui5-side-navigation-item[text="Users"]').click()
+  NEVER use page.locator('a').filter({ hasText: 'Manage Users' }) in Admin — those are not <a> tags.
+"""
+
+# ── [PLAYWRIGHT-CLI] ─────────────────────────────────────────────────────────
+# _plan_action_prompt / _verify_prompt / _correction_prompt:
+# Three prompt-builder functions for the direct Playwright step loop.
+# Plan → Execute → Verify → Correct was the manual orchestration pattern.
+# In MCP mode, Azure OpenAI's function-calling loop replaces all three phases
+# in a single conversation per step. These builders are no longer called.
+# ─────────────────────────────────────────────────────────────────────────────
 def _plan_action_prompt(step_desc: str, step_type: str, current_url: str,
-                        history_ctx: str, memory_hints: Optional[list] = None) -> str:
+                        history_ctx: str, memory_hints: Optional[list] = None,
+                        a11y_tree: str = "", ui_framework: str = "standard",
+                        extra_rules: Optional[list] = None,
+                        dom_info: str = "") -> str:
     hints_block = ""
     if memory_hints:
         hint_lines = []
@@ -2309,6 +2972,22 @@ def _plan_action_prompt(step_desc: str, step_type: str, current_url: str,
             + "\nTry these first — they worked before. Only deviate if the page looks different.\n"
         )
 
+    a11y_block = ""
+    if a11y_tree:
+        a11y_block = f"\nACCESSIBILITY TREE (actual DOM — use these roles/names for selectors):\n{a11y_tree}\n"
+
+    framework_rules = _SAP_UI5_RULES if ui_framework == "sap_ui5" else ""
+
+    learned_block = ""
+    if extra_rules:
+        learned_block = (
+            "\nRULES LEARNED FROM PREVIOUS FAILURES (highest priority — apply these first):\n"
+            + "\n".join(f"  ⚡ {r}" for r in extra_rules)
+            + "\n"
+        )
+
+    dom_block = f"\n{dom_info}\n" if dom_info else ""
+
     return f"""You are controlling a real web browser to automate a test step.
 
 CURRENT STEP: {step_desc}
@@ -2317,13 +2996,12 @@ CURRENT URL: {current_url}
 
 RECENT ACTIONS:
 {history_ctx or "(none yet)"}
-{hints_block}
-Study the screenshot and decide the best single action to take right now.
-Think carefully: look at the actual element roles, aria-labels, and text visible on screen.
+{hints_block}{a11y_block}{dom_block}{framework_rules}{learned_block}
+Study the screenshot AND the accessibility tree above. Prefer the tree for selector names — it shows the real DOM.
 Return ONLY a raw JSON object — no markdown:
 {{
-  "action": "click"|"fill"|"select_option"|"navigate"|"read"|"wait"|"hover"|"decision"|"done",
-  "selector": "CSS or Playwright locator — prefer aria-label, role, data-testid over classes",
+  "action": "click"|"fill"|"select_option"|"navigate"|"read"|"wait"|"wait_for"|"hover"|"key"|"decision"|"done",
+  "selector": "a locator STRING passable to page.locator() — see format rules below",
   "value": "text/URL/option to use — null for click/read/wait",
   "observation": "what you see on screen relevant to this step (1-2 sentences)",
   "confidence": "high"|"medium"|"low",
@@ -2331,11 +3009,33 @@ Return ONLY a raw JSON object — no markdown:
   "path_decision": null|"A"|"B"
 }}
 Rules:
-- Prefer: aria-label, getByRole, data-testid, text= locators
-- Avoid: long CSS class chains, positional selectors
+- Derive selectors from the accessibility tree (roles + names) — not from guessing CSS classes
+- For SAP UI5: use ui5-* component selectors, not shadow-DOM internals
 - For conditional/read steps: action="decision", set path_decision
 - If step already done: action="done"
-- For navigation: action="navigate", value=full URL"""
+- To close a dialog: try Escape key first (action="key", value="Escape")
+- For navigation: action="navigate", value=full URL
+
+SELECTOR FIELD FORMAT — CRITICAL:
+The "selector" value is passed directly to page.locator(). It must be a plain locator STRING.
+NEVER write TypeScript/JavaScript method calls in the selector field.
+
+✅ VALID selector strings (pass directly to page.locator()):
+  role=button[name="Home"]
+  ui5-input[placeholder="Search for new recruit"]
+  ui5-table-row:has-text("Matthew Moraga")
+  ui5-table-row:has-text("Matthew Moraga") >> ui5-table-cell:nth-child(3)
+  [role="row"]:has-text("Task Name") >> [role="cell"]:nth-child(N)
+  role=option[name^="Matthew Moraga"]
+  ui5-badge
+
+❌ INVALID — these are TypeScript code, NOT selector strings:
+  page.getByRole('row', {{ name: /Matthew/ }}).locator('td')     ← method call
+  getByRole('row').filter({{ hasText: 'Matthew' }})              ← method call
+  page.locator('ui5-table-row').filter({{ hasText: 'X' }})      ← method call
+
+For chaining: use >> between two locator strings, e.g.:
+  ui5-table-row:has-text("Matthew Moraga") >> ui5-table-cell:nth-child(3)"""
 
 
 def _verify_prompt(step_desc: str, action: str, selector: str, value: str) -> str:
@@ -2359,32 +3059,264 @@ Be strict: success=true only if there is clear visual evidence the action worked
 
 
 def _correction_prompt(step_desc: str, action_plan: dict, failure_reason: str,
-                        current_url: str, history_ctx: str) -> str:
-    return f"""A browser action just failed. Reason: {failure_reason}
+                        current_url: str, history_ctx: str,
+                        a11y_tree: str = "", ui_framework: str = "standard",
+                        extra_rules: Optional[list] = None,
+                        dom_info: str = "",
+                        page_analysis: str = "") -> str:
+    a11y_block = f"\nACCESSIBILITY TREE (use these for corrected selector):\n{a11y_tree}\n" if a11y_tree else ""
+    framework_rules = _SAP_UI5_RULES if ui_framework == "sap_ui5" else ""
+
+    learned_block = ""
+    if extra_rules:
+        learned_block = (
+            "\nRULES LEARNED FROM PREVIOUS FAILURES (apply these first when choosing the correction):\n"
+            + "\n".join(f"  ⚡ {r}" for r in extra_rules)
+            + "\n"
+        )
+
+    dom_block     = f"\n{dom_info}\n" if dom_info else ""
+    vision_block  = f"\n{page_analysis}\n" if page_analysis else ""
+
+    return f"""A browser action just failed. Think carefully about why and propose a correction.
 
 ORIGINAL STEP: {step_desc}
 FAILED ACTION: {action_plan.get('action')} on selector "{action_plan.get('selector')}"
+FAILURE REASON: {failure_reason}
 CURRENT URL: {current_url}
 
 RECENT ACTIONS:
 {history_ctx or "(none yet)"}
-
-Look at the screenshot (current page state after the failed attempt).
-Reason carefully about why the action failed and suggest a corrected action.
+{a11y_block}{dom_block}{vision_block}{framework_rules}{learned_block}
+Step-by-step reasoning required:
+1. Why did the original selector fail? Use the visual analysis and DOM inspection as primary evidence.
+2. What does the page actually show right now — is the browser on the right page/section?
+3. Is there a prerequisite action missing (e.g. clicking "Go", scrolling, dismissing a dialog)?
+4. What is the correct selector and action?
 
 Return ONLY a raw JSON object — no markdown:
 {{
-  "action": "click"|"fill"|"select_option"|"navigate"|"read"|"wait"|"hover"|"decision"|"done",
-  "selector": "corrected selector based on what you now see",
-  "value": "corrected value if needed — null otherwise",
-  "observation": "what you see now and why the original failed",
+  "action": "click"|"fill"|"select_option"|"navigate"|"read"|"wait"|"wait_for"|"hover"|"key"|"decision"|"done",
+  "selector": "corrected selector — prefer names from accessibility tree",
+  "value": "corrected value or key name (e.g. 'Escape') — null if not needed",
+  "observation": "what you see and why the original failed",
   "confidence": "high"|"medium"|"low",
-  "notes": "what was wrong and what you changed",
+  "notes": "what changed and why this correction should work",
   "path_decision": null|"A"|"B",
-  "reasoning": "step-by-step reasoning about why the original failed and why this correction should work"
-}}"""
+  "reasoning": "your step-by-step reasoning"
+}}
+Special cases:
+- Element resolves but can't be clicked → try action="key", value="Escape" to dismiss dialogs
+- SAP UI5 shadow DOM → use the ui5-* outer component tag, not the inner shadow child
+- Element not found → look in accessibility tree for similar role+name combinations
+
+TIMEOUT DIAGNOSIS (most important — read before proposing a correction):
+When the error contains "Timeout Xms exceeded" or "Timeout 20000ms" or "Timeout 30000ms":
+  This means the element EXISTS in the page but is NOT YET VISIBLE or INTERACTIVE.
+  It is a TIMING issue, NOT a wrong selector.
+
+  CORRECT response to a timeout:
+    Step 1 → use action="wait_for", same selector, value="30000"
+             This waits up to 30s for the element to become visible before acting.
+    Step 2 → on the NEXT retry, use the original action (fill/click) with the SAME selector.
+
+  WRONG response to a timeout:
+    ❌ Switching to a completely different selector (e.g. ui5-input → ui5-combobox → input)
+       — all three will time out for the same reason if the page hasn't rendered yet.
+    ❌ Adding a fixed page.wait_for_timeout() delay — prefer waiting for the specific element.
+
+  Example: fill on 'input[placeholder="Search for new recruit"]' timed out →
+    Correct correction: action="wait_for", selector="input[placeholder='Search for new recruit']", value="30000"
+    NOT: switch to ui5-input or ui5-combobox"""
 
 
+# ── [PLAYWRIGHT-CLI] ─────────────────────────────────────────────────────────
+# _analyse_page_visually: called on step failure to run a focused GPT-4V pass
+# on the failure screenshot. In MCP mode, browser_screenshot + the model's
+# own reasoning within the function-calling loop provides the same analysis.
+# ─────────────────────────────────────────────────────────────────────────────
+def _analyse_page_visually(shot_b64: str, step_desc: str,
+                           failed_selector: str, error: str) -> str:
+    """
+    Run a focused vision analysis on the failure screenshot.
+    Returns a concise text block injected into the correction prompt alongside
+    DOM inspection, giving the model both structural (DOM) and visual evidence.
+    Called on every step failure, not just table reads.
+    """
+    if not shot_b64:
+        return ""
+    try:
+        prompt = f"""You are analysing a browser screenshot to diagnose why a Playwright automation step failed.
+
+FAILED STEP: {step_desc}
+FAILED SELECTOR: {failed_selector}
+ERROR: {error[:200]}
+
+Answer these questions concisely based only on what you see in the screenshot:
+1. What page/section is currently visible? (URL path or heading)
+2. Is the target element visible? If yes, where? If no, what is shown instead?
+3. If a table is visible: list ALL column headers and say how many rows are shown. Is it filtered or showing all records?
+4. Are there any unclicked filter buttons, "Go" buttons, or search buttons that need to be activated?
+5. Are there loading spinners, dialogs, or error messages blocking interaction?
+6. In one sentence: what should be done differently on the next attempt?
+
+Be specific — name exact labels, button text, placeholder text you can read."""
+
+        raw = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{shot_b64}"}},
+                {"type": "text", "text": prompt},
+            ]}],
+            max_tokens=400,
+            temperature=0.1,
+        ).choices[0].message.content.strip()
+        return f"── VISUAL PAGE ANALYSIS ──\n{raw}"
+    except Exception as e:
+        logger.warning(f"[vision-analysis] failed: {e}")
+        return ""
+
+
+# ── [PLAYWRIGHT-CLI] ─────────────────────────────────────────────────────────
+# _inspect_dom_for_correction: runs page.evaluate() to inspect live DOM on step
+# failure and returns structured text for the correction prompt. In MCP mode,
+# the model calls browser_evaluate() and browser_snapshot() itself via tools.
+# ─────────────────────────────────────────────────────────────────────────────
+async def _inspect_dom_for_correction(page, failed_selector: str,
+                                       step_desc: str) -> str:
+    """
+    Run live DOM inspection when a step fails.
+    Returns a concise text block injected into the correction prompt so the
+    model picks its next selector from real page evidence, not guesses.
+    """
+    # Extract a text hint from the step description (e.g. candidate name)
+    text_hint = ""
+    hint_match = re.search(r"['\"]([^'\"]{3,})['\"]", step_desc)
+    if hint_match:
+        text_hint = hint_match.group(1)
+
+    try:
+        result = await page.evaluate(
+            """(args) => {
+                const { textHint } = args;
+
+                // Count every plausible table/list/row/cell element
+                const candidates = [
+                    'ui5-table','ui5-table-row','ui5-table-cell','ui5-table-header-row',
+                    'ui5-list','ui5-li','ui5-li-custom',
+                    '[role="row"]','[role="cell"]','[role="gridcell"]',
+                    '[role="listitem"]','[role="grid"]','[role="list"]',
+                    'tr','td','table'
+                ];
+                const counts = {};
+                for (const sel of candidates) {
+                    try { counts[sel] = document.querySelectorAll(sel).length; }
+                    catch (_) { counts[sel] = 0; }
+                }
+
+                // Find the first row containing the text hint
+                const rowSelectors = [
+                    'ui5-table-row','[role="row"]','tr',
+                    'ui5-li','ui5-li-custom','[role="listitem"]'
+                ];
+                let matchInfo = null;
+                for (const rowSel of rowSelectors) {
+                    const rows = Array.from(document.querySelectorAll(rowSel));
+                    const match = rows.find(r =>
+                        !textHint || (r.textContent || '').includes(textHint)
+                    );
+                    if (match) {
+                        const children = Array.from(match.children).map((c, i) => ({
+                            index: i + 1,
+                            tag:   c.tagName.toLowerCase(),
+                            role:  c.getAttribute('role') || '',
+                            text:  (c.textContent || '').trim().substring(0, 120),
+                            ariaLabel: c.getAttribute('aria-label') || '',
+                        }));
+                        matchInfo = {
+                            rowSelector: rowSel,
+                            childCount:  match.children.length,
+                            rowText:     (match.textContent || '').trim().substring(0, 300),
+                            children,
+                        };
+                        break;
+                    }
+                }
+
+                // Dump ALL row texts (first 10) so model sees actual table content
+                const allRowTexts = [];
+                for (const rowSel of rowSelectors) {
+                    const rows = Array.from(document.querySelectorAll(rowSel)).slice(0, 10);
+                    if (rows.length > 0) {
+                        rows.forEach((r, i) => {
+                            const children = Array.from(r.children).map((c, ci) => ({
+                                index: ci + 1,
+                                tag:   c.tagName.toLowerCase(),
+                                text:  (c.textContent || '').trim().substring(0, 80),
+                            }));
+                            allRowTexts.push({
+                                rowSelector: rowSel,
+                                rowIndex:    i + 1,
+                                rowText:     (r.textContent || '').trim().substring(0, 150),
+                                children,
+                            });
+                        });
+                        break; // use the first selector that finds rows
+                    }
+                }
+
+                return { counts, matchInfo, allRowTexts };
+            }""",
+            {"textHint": text_hint, "failed_selector": failed_selector},
+        )
+
+        lines = ["── LIVE DOM INSPECTION (use this to pick the correct selector) ──"]
+
+        non_zero = {k: v for k, v in result["counts"].items() if v > 0}
+        if non_zero:
+            lines.append("Elements present on page: " +
+                         ", ".join(f"{k}={v}" for k, v in non_zero.items()))
+        else:
+            lines.append("⚠️  No table/list elements found — page may still be loading.")
+
+        if result.get("matchInfo"):
+            m = result["matchInfo"]
+            lines.append(f"\nRow containing '{text_hint}' found with selector: {m['rowSelector']}")
+            lines.append(f"Row has {m['childCount']} child elements:")
+            for ch in m["children"]:
+                role_hint = f" [role={ch['role']}]" if ch["role"] else ""
+                aria_hint = f" [aria-label={ch['ariaLabel']}]" if ch["ariaLabel"] else ""
+                lines.append(f"  nth-child({ch['index']}): <{ch['tag']}>{role_hint}{aria_hint} → \"{ch['text']}\"")
+            lines.append(f"\nCORRECT selector pattern: {m['rowSelector']}:has-text(\"{text_hint}\") >> <child-tag>:nth-child(N)")
+            lines.append("Use the nth-child index from the table above for the column you need.")
+        else:
+            lines.append(f"\n⚠️  No row containing '{text_hint}' found.")
+            lines.append("This likely means the table uses task/section names as row identifiers, not the candidate name.")
+
+        # Always dump all row texts — critical when candidate name row isn't found
+        all_rows = result.get("allRowTexts", [])
+        if all_rows:
+            lines.append(f"\nALL TABLE ROWS FOUND (use these text values for :has-text() filters):")
+            first_sel = all_rows[0]["rowSelector"]
+            lines.append(f"Row element: {first_sel}")
+            for r in all_rows:
+                lines.append(f"  Row {r['rowIndex']}: \"{r['rowText']}\"")
+                for ch in r.get("children", []):
+                    lines.append(f"    nth-child({ch['index']}): <{ch['tag']}> → \"{ch['text']}\"")
+            lines.append(f"\nCORRECT selector pattern: {first_sel}:has-text(\"<row text from above>\") >> <child-tag>:nth-child(N)")
+
+        return "\n".join(lines)
+
+    except Exception as exc:
+        return f"── DOM inspection failed: {exc} ──"
+
+
+# ── [PLAYWRIGHT-CLI] ─────────────────────────────────────────────────────────
+# _execute_exploration_action: dispatches a single action (click, fill,
+# navigate, …) onto a direct Playwright `page` object. In MCP mode, the Azure
+# OpenAI model calls MCP tools (browser_click, browser_fill, browser_navigate,
+# …) directly — no Python dispatcher is needed.
+# ─────────────────────────────────────────────────────────────────────────────
 async def _execute_exploration_action(page, action: str, selector: str,
                                        value: Optional[str]) -> Optional[str]:
     """Execute one action on the page. Returns read text for 'read' actions."""
@@ -2401,52 +3333,623 @@ async def _execute_exploration_action(page, action: str, selector: str,
     elif action == "wait":
         await page.wait_for_timeout(int(value or 2000))
 
+    elif action == "wait_for":
+        # Smart wait — waits for a specific element to become visible before proceeding.
+        # The model uses this when it detects a timing issue (element exists but not ready).
+        if selector:
+            await page.locator(selector).first.wait_for(state="visible", timeout=int(value or 30_000))
+
+    elif action == "key":
+        await page.keyboard.press(value or "Escape")
+        await page.wait_for_timeout(500)
+
     elif action == "read":
         if selector:
-            return await page.locator(selector).first.text_content(timeout=15_000)
+            loc = page.locator(selector).first
+            await loc.wait_for(state="visible", timeout=30_000)
+            return await loc.text_content(timeout=30_000)
 
     elif action == "hover":
-        await page.locator(selector).first.hover(timeout=10_000)
+        await page.locator(selector).first.hover(timeout=15_000)
         await page.wait_for_timeout(500)
 
     elif action == "click":
-        await page.locator(selector).first.click(timeout=20_000)
+        await page.locator(selector).first.click(timeout=30_000)
         await page.wait_for_timeout(1500)
 
     elif action == "fill":
-        await page.locator(selector).first.fill(value or "", timeout=15_000)
+        await page.locator(selector).first.fill(value or "", timeout=20_000)
+        await page.wait_for_timeout(800)
 
     elif action == "select_option":
         loc = page.locator(selector).first
         if value:
-            await loc.select_option(value, timeout=15_000)
+            await loc.select_option(value, timeout=20_000)
         else:
             opts = await loc.locator("option").all()
             if opts:
                 first_val = await opts[0].get_attribute("value") or ""
-                await loc.select_option(first_val, timeout=15_000)
+                await loc.select_option(first_val, timeout=20_000)
 
     return None
 
 
-@app.post("/api/explore")
-async def explore_test_case(req: ExploreRequest):
+# ── [MCP] Framework detection via browser_evaluate ───────────────────────────
+
+async def _detect_ui_framework_mcp(bridge: "PlaywrightMCPBridge", test_case: str) -> str:
+    """Detect the UI framework via MCP browser_evaluate (replaces _detect_ui_framework).
+
+    Checks the current URL first (works during SSO redirects before any
+    ui5-* elements have rendered), then falls back to a live DOM query.
     """
-    Stage 1 — Browser Exploration.
-    Launches a real Playwright browser (with storageState for auth), drives it
-    step-by-step using GPT-4V vision, records verified selectors, and produces
-    a Markdown file that can be used as the backbone for test generation.
+    _SAP_DOMAINS = ("successfactors.com", "sap.com", "onboarding2",
+                    "performancemanager", "plateau.com")
+    try:
+        url = await bridge.get_current_url()
+        if any(d in url for d in _SAP_DOMAINS):
+            return "sap_ui5"
+        result = await bridge.call_tool("browser_evaluate", {
+            "function": "() => !!document.querySelector('ui5-button,ui5-dialog,ui5-input,[data-sap-ui]')"
+        })
+        if "true" in result.get("text", "").lower():
+            return "sap_ui5"
+    except Exception as e:
+        logger.warning(f"[MCP] Framework detection failed: {e}")
+    return "standard"
+
+
+# ── [MCP] Per-step tool-use loop ─────────────────────────────────────────────
+
+def _mcp_tool_to_action(tool_name: str) -> str:
+    """Map an MCP tool name to the action string used in steps_log."""
+    return {
+        "browser_click":         "click",
+        "browser_fill":          "fill",
+        "browser_navigate":      "navigate",
+        "browser_press_key":     "key",
+        "browser_wait_for":      "wait",
+        "browser_select_option": "select_option",
+        "browser_evaluate":      "read",
+        "browser_take_screenshot": "read",
+        "browser_snapshot":      "read",
+        "browser_hover":         "hover",
+    }.get(tool_name, "interact")
+
+
+def _summarise_args(args: dict) -> str:
+    """One-line summary of MCP tool args for SSE log messages."""
+    if "url" in args:
+        return f"url={args['url'][:70]}"
+    if "element" in args:
+        s = f"element={args['element'][:50]}"
+        if "value" in args:
+            s += f", value={str(args['value'])[:30]}"
+        return s
+    if "function" in args:
+        return f"fn={args['function'][:50]}"
+    return str(args)[:80]
+
+
+async def _gather_dom_on_failure(bridge, step_desc: str, failed_selector: str) -> str:
+    """Run targeted DOM queries after a step failure — mirrors CLI's DOM injection in _correction_prompt.
+
+    Returns a formatted text block injected into the retry attempt's system prompt.
     """
-    exploration_id = str(uuid.uuid4())[:8]
+    async def _eval(js: str) -> str:
+        try:
+            r = await bridge.call_tool("browser_evaluate", {"function": js})
+            return r.get("text", "").strip().strip('"').strip("'")
+        except Exception:
+            return ""
+
+    lines: list[str] = []
+
+    url = await _eval("() => window.location.href")
+    if url:
+        lines.append(f"Current URL: {url}")
+
+    title_h1 = await _eval(
+        "() => document.title.slice(0,80) + ' | h1=' + (document.querySelector('h1,h2')?.innerText?.slice(0,60) || 'none')"
+    )
+    if title_h1:
+        lines.append(f"Page title/heading: {title_h1}")
+
+    alerts = await _eval(
+        "() => Array.from(document.querySelectorAll('[role=\"alert\"],[class*=\"error\" i],[class*=\"message\" i]'))"
+        ".map(e=>e.innerText?.trim()).filter(Boolean).slice(0,3).join(' || ')"
+    )
+    if alerts:
+        lines.append(f"Visible alerts/errors: {alerts[:200]}")
+
+    # Elements matching the first meaningful keyword — search ALL elements, not just standard tags
+    # (SAP Fiori flyout items may use custom web components absent from the a11y tree)
+    keywords = [w for w in step_desc.lower().split() if len(w) > 3]
+    if keywords:
+        kw = keywords[0]
+        matches = await _eval(
+            f"() => Array.from(document.querySelectorAll('*'))"
+            f".filter(e=>e.offsetParent!==null&&/{kw}/i.test((e.innerText||e.getAttribute('aria-label')||'').trim())&&!e.querySelector('*'))"
+            f".map(e=>e.tagName+':\"'+((e.innerText||e.getAttribute('aria-label')||'').trim().slice(0,40))+'\"')"
+            f".slice(0,8).join(', ')"
+        )
+        if matches:
+            lines.append(f"Visible elements matching '{kw}': {matches[:300]}")
+
+    overlays = await _eval(
+        "() => Array.from(document.querySelectorAll('[class*=\"overlay\" i],[class*=\"modal\" i],[class*=\"walkme\" i]'))"
+        ".filter(e=>getComputedStyle(e).display!=='none'&&getComputedStyle(e).visibility!=='hidden')"
+        ".map(e=>e.className.slice(0,50)).slice(0,3).join(', ')"
+    )
+    if overlays:
+        lines.append(f"Potential blocking overlays: {overlays[:200]}")
+
+    counts = await _eval(
+        "() => 'buttons=' + document.querySelectorAll('button:not([disabled])').length"
+        " + ' inputs=' + document.querySelectorAll('input:not([disabled])').length"
+        " + ' links=' + document.querySelectorAll('a[href]').length"
+    )
+    if counts:
+        lines.append(f"Interactive element counts: {counts}")
+
+    return "\n".join(lines) if lines else "(DOM inspection returned no data)"
+
+
+async def _pre_step_dom_scan(bridge) -> str:
+    """Single-call DOM scan injected into every step's system prompt.
+
+    Runs ONE browser_evaluate with a comprehensive JS function that reads
+    the live DOM — not the accessibility tree. This captures elements that
+    ARIA/snapshot misses: SAP Fiori flyout items, shadow-DOM portals,
+    web-component labels, and dynamically-rendered overlays.
+
+    Returns a compact text block the LLM receives before making any tool call,
+    so it doesn't need browser_snapshot round-trips to discover page state.
+    """
+    _JS = """() => {
+      const vis = e => {
+        if (!e) return false;
+        const r = e.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 &&
+               getComputedStyle(e).visibility !== 'hidden' &&
+               getComputedStyle(e).display !== 'none';
+      };
+      const txt = e => (e.innerText || e.textContent || e.getAttribute('aria-label') || e.getAttribute('title') || '').trim().replace(/\\s+/g,' ').slice(0, 60);
+
+      // Visible links (navigation targets, menu items in SAP portals)
+      const links = Array.from(document.querySelectorAll('a[href], [role="menuitem"], [role="option"]'))
+        .filter(vis)
+        .map(e => ({ t: txt(e), h: e.getAttribute('href') || '' }))
+        .filter(e => e.t)
+        .slice(0, 25);
+
+      // Visible buttons
+      const btns = Array.from(document.querySelectorAll('button, [role="button"]'))
+        .filter(e => vis(e) && !e.disabled)
+        .map(txt).filter(Boolean).slice(0, 20);
+
+      // Visible inputs / form fields
+      const inputs = Array.from(document.querySelectorAll('input, textarea, [role="textbox"], [role="combobox"], select'))
+        .filter(vis)
+        .map(e => e.getAttribute('placeholder') || e.getAttribute('aria-label') || e.getAttribute('name') || e.tagName)
+        .filter(Boolean).slice(0, 10);
+
+      // Open overlays / modals / popovers that might block clicks
+      const overlays = Array.from(document.querySelectorAll(
+        '[class*="overlay" i], [class*="popover" i], [class*="modal" i], [role="dialog"], [role="alertdialog"]'
+      )).filter(vis).map(e => (e.getAttribute('aria-label') || e.className || e.tagName).slice(0,60)).slice(0,5);
+
+      // SAP UI5 custom components visible on page (ui5-* tags)
+      const ui5 = Array.from(document.querySelectorAll('[class*="sapUi"], ui5-list, ui5-table, ui5-busy-indicator'))
+        .filter(vis).map(e => e.tagName.toLowerCase()).filter((v,i,a)=>a.indexOf(v)===i).slice(0,8);
+
+      return JSON.stringify({
+        url:      window.location.pathname + window.location.hash,
+        title:    document.title.slice(0,80),
+        links:    links,
+        buttons:  btns,
+        inputs:   inputs,
+        overlays: overlays,
+        ui5:      ui5,
+      });
+    }"""
+    try:
+        raw = await bridge.call_tool("browser_evaluate", {"function": _JS})
+        data = json.loads(raw.get("text", "{}").strip().strip('"').replace('\\"', '"'))
+
+        parts: list[str] = []
+        parts.append(f"URL: {data.get('url', '?')}  Title: {data.get('title', '?')[:60]}")
+
+        if data.get("links"):
+            link_strs = [
+                f"{l['t']}" + (f" → {l['h']}" if l.get("h") else "")
+                for l in data["links"]
+            ]
+            parts.append("Visible links/menu items:\n  " + "\n  ".join(link_strs))
+
+        if data.get("buttons"):
+            parts.append("Visible buttons: " + ", ".join(data["buttons"]))
+
+        if data.get("inputs"):
+            parts.append("Visible inputs: " + ", ".join(data["inputs"]))
+
+        if data.get("overlays"):
+            parts.append("⚠️ Open overlays/modals: " + ", ".join(data["overlays"]))
+
+        if data.get("ui5"):
+            parts.append("SAP UI5 components present: " + ", ".join(data["ui5"]))
+
+        return "\n".join(parts)
+
+    except Exception as e:
+        logger.debug(f"[MCP] pre-step DOM scan failed: {e}")
+        return ""
+
+
+async def _verify_step_mcp(
+    step_desc:    str,
+    action_taken: str,
+    selector:     str,
+    url_before:   str,
+    url_after:    str,
+    after_b64:    Optional[str],
+    model_result: dict,
+) -> dict:
+    """Explicit post-action verification — mirrors the old CLI _verify_prompt pattern.
+
+    Makes a separate LLM call with the after-screenshot + URL delta to confirm
+    whether the step actually succeeded. Overrides the model's self-assessment
+    when they disagree.
+
+    Returns a result dict in the same shape as _run_step_with_mcp().
+    Falls back to model_result unchanged if no screenshot is available.
+    """
+    if not after_b64:
+        return model_result
+
+    url_change = (
+        f"URL changed: {url_before} → {url_after}"
+        if url_before != url_after
+        else f"URL unchanged: {url_after}"
+    )
+
+    content: list = [
+        {
+            "type": "text",
+            "text": (
+                f"Verify whether this browser step succeeded.\n\n"
+                f"STEP GOAL: {step_desc}\n"
+                f"ACTION TAKEN: {action_taken} on \"{selector}\"\n"
+                f"{url_change}\n"
+                f"MODEL'S OWN ASSESSMENT: {model_result.get('observation', '')}\n\n"
+                f"Look at the AFTER screenshot below and judge whether the goal was achieved.\n"
+                f"Return ONLY this JSON — no markdown:\n"
+                f"{{\"success\": true|false, "
+                f"\"observation\": \"what you see — did the goal happen?\", "
+                f"\"correction_hint\": \"if failed: specific reason + what to try next\"}}\n\n"
+                f"Be strict: success=true only with clear visual evidence "
+                f"(menu opened, field filled, page navigated, value visible, etc.).\n"
+                f"Important: some actions (filter buttons, in-page updates) do NOT change the URL — "
+                f"judge by content change, not URL delta. If the model's own assessment says it "
+                f"succeeded and the screenshot is on the expected page, give significant weight to "
+                f"the model's assessment."
+            ),
+        },
+        {
+            "type":      "image_url",
+            "image_url": {"url": f"data:image/png;base64,{after_b64}", "detail": "low"},
+        },
+    ]
+
+    try:
+        resp = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[
+                {"role": "system",
+                 "content": "You verify browser automation outcomes from screenshots."},
+                {"role": "user", "content": content},
+            ],
+            max_tokens=300,
+            temperature=0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        raw = re.sub(r"```(?:json)?[\n]?", "", raw).strip().rstrip("`").strip()
+        verified = json.loads(raw)
+        verified.setdefault("correction_hint", "")
+        # Preserve fields the verify call doesn't return
+        verified.setdefault("action",        model_result.get("action", action_taken))
+        verified.setdefault("selector",      model_result.get("selector", selector))
+        verified.setdefault("value",         model_result.get("value"))
+        verified.setdefault("read_value",    model_result.get("read_value"))
+        verified.setdefault("screenshot_file", model_result.get("screenshot_file", ""))
+        verified.setdefault("path_decision", model_result.get("path_decision"))
+        return verified
+    except Exception as e:
+        logger.warning(f"[MCP] Verify call failed ({e}) — keeping model self-report")
+        return model_result
+
+
+async def _run_step_with_mcp(
+    bridge:         "PlaywrightMCPBridge",
+    step_desc:      str,
+    step_type:      str,
+    history_ctx:    str,
+    memory_hints:   list,
+    ui_framework:   str,
+    extra_rules:    list,
+    exploration_id: str,
+    step_counter:   int,
+    shots_dir:      "Path",
+    queue:          Optional[asyncio.Queue],
+    correction_hints: str = "",
+) -> dict:
+    """Run one exploration step via Azure OpenAI function-calling + Playwright MCP.
+
+    Azure OpenAI calls MCP tools (browser_snapshot, browser_click, …) in a
+    loop until it decides the step is done, then returns a JSON result summary.
+    This replaces the manual plan→execute→verify→correct loop used in Playwright
+    CLI mode.
+
+    Returns a dict with keys: success, action, selector, value, observation,
+                               read_value, screenshot_file, path_decision.
+    """
+    MAX_TOOL_CALLS = 25   # SAP UI5 pages can need several snapshot + click rounds
+
+    # ── Build system message ──────────────────────────────────────────────────
+    hints_block = ""
+    if memory_hints:
+        lines = []
+        for h in memory_hints:
+            conf = h.get("confidence", "medium")
+            sel  = h.get("selector", "")
+            act  = h.get("action", "")
+            val  = h.get("value")
+            lines.append(
+                f'  [{conf}] {act} on "{sel}"' + (f' value="{val}"' if val else "")
+            )
+        hints_block = (
+            "Past verified interactions on this site (try these first):\n"
+            + "\n".join(lines)
+        )
+
+    framework_rules = _SAP_UI5_RULES if ui_framework == "sap_ui5" else ""
+    learned_block   = (
+        "Rules learned from previous failures (apply first):\n"
+        + "\n".join(f"  ⚡ {r}" for r in extra_rules)
+    ) if extra_rules else ""
+
+    correction_block = (
+        f"\n⚡ CORRECTION — PREVIOUS ATTEMPT FAILED. Apply these findings before acting:\n{correction_hints}\n"
+        if correction_hints else ""
+    )
+
+    # ── Pre-step DOM scan ─────────────────────────────────────────────────────
+    # Read the live DOM BEFORE building the system prompt so the LLM has
+    # accurate page state without needing browser_snapshot round-trips.
+    # This captures elements absent from the accessibility tree (SAP Fiori
+    # flyout items, shadow-DOM portals, web-component labels, open overlays).
+    dom_scan_raw = await _pre_step_dom_scan(bridge)
+    if dom_scan_raw and queue:
+        await _emit(queue, "log", level="info",
+                    message=f"🔍 DOM scan: {dom_scan_raw.splitlines()[0][:120]}")
+    dom_state_block = (
+        f"\n── LIVE DOM STATE (read directly from DOM, not accessibility tree) ──\n"
+        f"{dom_scan_raw}\n"
+        f"── Use this to identify targets before calling browser_snapshot ──\n"
+    ) if dom_scan_raw else ""
+
+    system_msg = f"""You are controlling a real browser to complete a test automation step.
+{correction_block}
+{dom_state_block}
+{framework_rules}
+{learned_block}
+{hints_block}
+
+TOOL STRATEGY:
+1. You already have the LIVE DOM STATE above — read it first to identify the target element.
+   If the element is listed there (link, button, input), act on it directly without browser_snapshot.
+2. Call browser_take_screenshot when you need to SEE the page visually (layout, state, overlays).
+3. Call browser_snapshot only when you need an exact element ref (e.g. ref=e123) for browser_click.
+4. After any action that changes the page (click, fill, navigate), take a browser_take_screenshot to confirm.
+5. Use the element ref from snapshots for interactions — do NOT guess selectors.
+6. For SAP UI5 pages: if an element is in the LIVE DOM STATE links list, prefer browser_evaluate
+   or browser_navigate over browser_snapshot (the accessibility tree may not show it).
+7. NEVER call browser_snapshot more than 3 times in a row. If stuck, browser_take_screenshot tells you more.
+8. Use browser_take_screenshot for all screenshots — it returns the image directly to you.
+
+OVERLAY / BLOCKING ELEMENT HANDLING:
+- If a click times out or fails because another element is intercepting pointer events (overlay, tutorial, chat widget, cookie banner, guided tour, etc.):
+  1. Snapshot to identify the blocking element by its ref, id, or class.
+  2. Use browser_evaluate to remove it: {{"function": "() => document.querySelector('SELECTOR').remove()"}}
+     OR for multiple elements: {{"function": "() => document.querySelectorAll('SELECTOR').forEach(e=>e.remove())"}}
+  3. Retry the original click — do NOT give up on first timeout due to an overlay.
+
+When the step goal is accomplished (or you cannot proceed after trying), respond
+with ONLY this JSON — no markdown, no explanation:
+{{"success": true|false, "action": "click|fill|navigate|read|key|wait|failed", "selector": "element label you interacted with", "value": null or "string used for fill/navigate", "observation": "detailed description: current URL, what IS visible on page, what you tried, and exactly why it failed or succeeded", "read_value": null or "text that was read from the page", "path_decision": null or "A" or "B"}}
+
+FAILURE REPORTING RULES — always include in observation when success=false:
+- Current page URL (from browser_snapshot header or browser_evaluate window.location.href)
+- What IS visible (page title, key headings, form fields, buttons seen)
+- What you tried (exact element ref or selector attempted)
+- Root cause (element not found / wrong page / blocked / timed out)"""
+
+    messages = [
+        {"role": "system", "content": system_msg},
+        {
+            "role": "user",
+            "content": (
+                f"Complete this step: {step_desc}\n"
+                f"Step type: {step_type}\n\n"
+                f"Recent history:\n{history_ctx or '(none yet)'}"
+            ),
+        },
+    ]
+
+    last_tool_name = ""
+    last_tool_args: dict = {}
+    screenshot_file = ""
+    consecutive_snapshots = 0   # loop-detection counter
+    import base64 as _b64
+
+    for call_num in range(MAX_TOOL_CALLS):
+        # Inject a nudge if the model has been snapshotting without acting
+        if consecutive_snapshots >= 3:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "You have called browser_snapshot multiple times without acting. "
+                    "Stop snapshotting. Use the element refs already returned to call "
+                    "browser_click or browser_fill now. If the target element is truly "
+                    "absent, report failure with success=false."
+                ),
+            })
+            consecutive_snapshots = 0
+        response = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=messages,
+            tools=bridge.azure_tool_definitions,
+            tool_choice="auto",
+            max_tokens=1000,
+            temperature=0.1,
+        )
+
+        msg           = response.choices[0].message
+        finish_reason = response.choices[0].finish_reason
+
+        # Serialise the assistant turn — tool_calls must be present if non-empty
+        assistant_turn: dict = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            assistant_turn["tool_calls"] = [
+                {
+                    "id":       tc.id,
+                    "type":     "function",
+                    "function": {
+                        "name":      tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+        messages.append(assistant_turn)
+
+        if finish_reason == "stop" or not msg.tool_calls:
+            # Model finished — parse final text as step result JSON
+            final_text = (msg.content or "").strip()
+            final_text = re.sub(r"```(?:json)?[\n]?", "", final_text).strip().rstrip("`").strip()
+            try:
+                result = json.loads(final_text)
+            except Exception:
+                # Fallback: infer from last tool call
+                result = {
+                    "success":     bool(last_tool_name and last_tool_name != "browser_wait_for"),
+                    "action":      _mcp_tool_to_action(last_tool_name),
+                    "selector":    last_tool_args.get("element", last_tool_args.get("url", "")),
+                    "value":       last_tool_args.get("value", last_tool_args.get("url")),
+                    "observation": final_text or "Step completed",
+                    "read_value":  None,
+                    "path_decision": None,
+                }
+            result.setdefault("screenshot_file", screenshot_file)
+            result.setdefault("path_decision", None)
+            return result
+
+        # ── Execute every tool call the model requested ───────────────────────
+        for tc in msg.tool_calls:
+            tool_name = tc.function.name
+            try:
+                tool_args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                tool_args = {}
+
+            last_tool_name = tool_name
+            last_tool_args = tool_args
+
+            # Track consecutive snapshot calls for loop detection
+            if tool_name == "browser_snapshot":
+                consecutive_snapshots += 1
+            else:
+                consecutive_snapshots = 0
+
+            await _emit(queue, "log", level="info",
+                        message=f"🔧 {tool_name}({_summarise_args(tool_args)})")
+            logger.debug(
+                f"[MCP {exploration_id}] step {step_counter} call {call_num+1}: "
+                f"{tool_name}({_summarise_args(tool_args)})"
+            )
+
+            try:
+                tool_result = await bridge.call_tool(tool_name, tool_args)
+
+                # Screenshot: save to disk AND pass back as vision so the model can see the page
+                if tool_result.get("screenshot_b64") and shots_dir:
+                    fname = f"step-{step_counter:03d}-mcp-call{call_num+1}.png"
+                    (shots_dir / fname).write_bytes(_b64.b64decode(tool_result["screenshot_b64"]))
+                    screenshot_file = fname
+                    # Return image content in tool response so model has visual context
+                    tool_content: Any = [
+                        {"type": "text", "text": f"Screenshot taken (saved as {fname}). Describe what you see and decide the next action."},
+                        {"type": "image_url", "image_url": {
+                            "url":    f"data:image/png;base64,{tool_result['screenshot_b64']}",
+                            "detail": "low",
+                        }},
+                    ]
+                else:
+                    # Trim long accessibility trees so the context stays manageable
+                    raw_text = tool_result.get("text", "")
+                    tool_content = raw_text[:4000] + ("…" if len(raw_text) > 4000 else "")
+
+            except Exception as te:
+                tool_content = f"Tool error: {te}"
+                logger.warning(
+                    f"[MCP {exploration_id}] step {step_counter} tool error "
+                    f"— {tool_name}: {te}"
+                )
+
+            messages.append({
+                "role":         "tool",
+                "tool_call_id": tc.id,
+                "content":      tool_content,
+            })
+
+    # Exceeded max tool calls without a final answer
+    return {
+        "success":       False,
+        "action":        "failed",
+        "selector":      "",
+        "value":         None,
+        "observation":   f"Step exceeded {MAX_TOOL_CALLS} tool calls without completing",
+        "read_value":    None,
+        "path_decision": None,
+        "screenshot_file": screenshot_file,
+    }
+
+
+# ── SSE helper ────────────────────────────────────────────────────────────────
+
+async def _emit(queue: Optional[asyncio.Queue], event_type: str, **kwargs) -> None:
+    """Put a structured event onto the SSE queue (no-op if queue is None)."""
+    if queue:
+        await queue.put({"type": event_type, **kwargs})
+
+
+async def _run_exploration(req: ExploreRequest,
+                            exploration_id: str,
+                            queue: Optional[asyncio.Queue] = None,
+                            _suppress_close: bool = False) -> dict:
+    """
+    Core exploration logic — shared by both the sync endpoint and the SSE endpoint.
+    Emits structured events to `queue` when provided (SSE mode).
+    """
     expl_dir  = EXPLORATIONS_DIR / exploration_id
     shots_dir = expl_dir / "screenshots"
     expl_dir.mkdir(parents=True, exist_ok=True)
     shots_dir.mkdir(exist_ok=True)
 
     steps_log  = []
-    pb         = None
-    browser    = None
     path_taken = None   # "A" or "B" once a conditional decision is made
+    # [PLAYWRIGHT-CLI] pb / browser / ctx / page no longer declared here;
+    # they are replaced by `bridge` below.
+    bridge: Optional[PlaywrightMCPBridge] = None  # MCP: set in E1 below
 
     try:
         logger.info(f"[EXPLORE {exploration_id}] Starting — {req.test_case[:80]}...")
@@ -2485,46 +3988,629 @@ async def explore_test_case(req: ExploreRequest):
             logger.error(f"[EXPLORE {exploration_id}] Step parsing failed: {pe}")
             return {"error": f"Could not parse test steps: {pe}", "explorationId": exploration_id, "steps": []}
 
-        # ── E1: Launch browser ─────────────────────────────────────────────
-        pb      = await async_playwright().start()
-        browser = await pb.chromium.launch(headless=False)
+        # ══════════════════════════════════════════════════════════════════════
+        # [PLAYWRIGHT-CLI] E1: Direct Playwright browser launch
+        # The block below used async_playwright() to launch a browser directly.
+        # In MCP mode this is replaced by PlaywrightMCPBridge (see [MCP] E1).
+        # To restore Playwright CLI behavior: remove the [MCP] E1 block and
+        # uncomment this section, then restore _detect_ui_framework(page) in E1.5.
+        # ══════════════════════════════════════════════════════════════════════
+        # pb      = await async_playwright().start()
+        # browser = await pb.chromium.launch(headless=req.headless)
+        # _DOMAIN_AUTH_MAP = {
+        #     "successfactors.com": "successfactors",
+        #     "plateau.com":        "successfactors",
+        #     "sap.com":            "successfactors",
+        # }
+        # ctx_kwargs: dict = {}
+        # _auth_loaded = False
+        # if req.storage_state:
+        #     auth_path = BASE / ".auth" / f"{req.storage_state}.json"
+        #     if auth_path.exists():
+        #         ctx_kwargs["storage_state"] = str(auth_path)
+        #         _auth_loaded = True
+        #         logger.info(f"[EXPLORE {exploration_id}] Using storageState: {auth_path.name}")
+        #     else:
+        #         logger.warning(f"[EXPLORE {exploration_id}] storageState not found: {auth_path}")
+        # if not _auth_loaded:
+        #     _url_hint = re.search(r'https?://[^\s]+', req.test_case)
+        #     if _url_hint:
+        #         _url_str = _url_hint.group(0)
+        #         for _domain, _auth_name in _DOMAIN_AUTH_MAP.items():
+        #             if _domain in _url_str:
+        #                 _auto_path = BASE / ".auth" / f"{_auth_name}.json"
+        #                 if _auto_path.exists():
+        #                     ctx_kwargs["storage_state"] = str(_auto_path)
+        #                     _auth_loaded = True
+        #                     logger.info(f"[EXPLORE {exploration_id}] 🔑 Auto-loaded: {_auto_path.name}")
+        #                     await _emit(queue, "log", level="info", message=f"🔑 Auto-loaded session: {_auth_name}.json")
+        #                 else:
+        #                     logger.warning(f"[EXPLORE {exploration_id}] No auth file for {_domain}")
+        #                     await _emit(queue, "log", level="warn", message=f"⚠️ No session for {_domain}. Run auth.ts first.")
+        #                 break
+        # ctx  = await browser.new_context(**ctx_kwargs)
+        # page = await ctx.new_page()
+        # url_match = re.search(r'https?://[^\s]+', req.test_case)
+        # if url_match:
+        #     start_url = url_match.group(0).rstrip('.,)')
+        #     for _w, _t in [('domcontentloaded', 60_000), ('load', 60_000), ('commit', 90_000)]:
+        #         try:
+        #             await page.goto(start_url, wait_until=_w, timeout=_t)
+        #             logger.info(f"[EXPLORE {exploration_id}] Page loaded (wait_until='{_w}')")
+        #             break
+        #         except Exception:
+        #             pass
+        #     await page.wait_for_timeout(NAV_PAUSE_MS)
+        # [PLAYWRIGHT-CLI] E1.5 (direct Playwright):
+        # _sso_indicators = ("login", "signin", "sso", "authenticate", "microsoftonline",
+        #                    "iasauthentication", "okta", "adfs", "saml")
+        # _current_url_lower = page.url.lower()
+        # if any(s in _current_url_lower for s in _sso_indicators):
+        #     _msg = ("🔒 Session expired — browser landed on a login/SSO page. "
+        #             "Run 'npx ts-node scripts/auth.ts' to refresh the session, then retry.")
+        #     logger.warning(f"[EXPLORE {exploration_id}] {_msg}")
+        #     await _emit(queue, "log", level="warn", message=_msg)
+        # ui_framework = await _detect_ui_framework(page)   # [PLAYWRIGHT-CLI]
 
-        ctx_kwargs: dict = {}
+        # ── [MCP] E1: Start PlaywrightMCPBridge ───────────────────────────────
+        _DOMAIN_AUTH_MAP = {
+            "successfactors.com": "successfactors",
+            "plateau.com":        "successfactors",
+            "sap.com":            "successfactors",
+        }
+        _sso_indicators = ("login", "signin", "sso", "authenticate", "microsoftonline",
+                           "iasauthentication", "okta", "adfs", "saml")
+
+        # Resolve auth file (same logic as Playwright CLI, but passed to MCP server)
+        _auth_path_str: Optional[str] = None
         if req.storage_state:
-            auth_path = BASE / ".auth" / f"{req.storage_state}.json"
-            if auth_path.exists():
-                ctx_kwargs["storage_state"] = str(auth_path)
-                logger.info(f"[EXPLORE {exploration_id}] Using storageState: {auth_path.name}")
+            _ap = BASE / ".auth" / f"{req.storage_state}.json"
+            if _ap.exists():
+                _auth_path_str = str(_ap)
+                logger.info(f"[EXPLORE {exploration_id}] Using storageState: {_ap.name}")
+                await _emit(queue, "log", level="info",
+                            message=f"🔑 Session: {req.storage_state}.json")
             else:
-                logger.warning(f"[EXPLORE {exploration_id}] storageState not found: {auth_path} — continuing without auth")
+                logger.warning(f"[EXPLORE {exploration_id}] storageState not found: {_ap}")
+                await _emit(queue, "log", level="warn",
+                            message=f"⚠️ No session file: {req.storage_state}.json — run auth.ts first")
+        else:
+            _url_hint = re.search(r'https?://[^\s]+', req.test_case)
+            if _url_hint:
+                for _domain, _auth_name in _DOMAIN_AUTH_MAP.items():
+                    if _domain in _url_hint.group(0):
+                        _ap = BASE / ".auth" / f"{_auth_name}.json"
+                        if _ap.exists():
+                            _auth_path_str = str(_ap)
+                            logger.info(f"[EXPLORE {exploration_id}] 🔑 Auto-loaded: {_ap.name}")
+                            await _emit(queue, "log", level="info",
+                                        message=f"🔑 Auto-loaded session: {_auth_name}.json")
+                        else:
+                            logger.warning(f"[EXPLORE {exploration_id}] No auth file for {_domain}")
+                            await _emit(queue, "log", level="warn",
+                                        message=f"⚠️ No session for {_domain}. Run auth.ts first.")
+                        break
 
-        ctx  = await browser.new_context(**ctx_kwargs)
-        page = await ctx.new_page()
+        bridge = PlaywrightMCPBridge(
+            storage_state=_auth_path_str,
+            headless=req.headless,
+        )
+        await bridge.start()
+        await _emit(queue, "log", level="info", message="🌐 Playwright MCP server started")
 
-        # Navigate to start URL extracted from the test description
+        # Navigate to start URL via MCP
         url_match = re.search(r'https?://[^\s]+', req.test_case)
         if url_match:
             start_url = url_match.group(0).rstrip('.,)')
             logger.info(f"[EXPLORE {exploration_id}] Navigating to {start_url}")
-            for _w, _t in [('domcontentloaded', 60_000), ('load', 60_000), ('commit', 90_000)]:
-                try:
-                    await page.goto(start_url, wait_until=_w, timeout=_t)
-                    logger.info(f"[EXPLORE {exploration_id}] Page loaded (wait_until='{_w}')")
-                    break
-                except Exception:
-                    pass
-            await page.wait_for_timeout(NAV_PAUSE_MS)
+            await bridge.call_tool("browser_navigate", {"url": start_url})
+            await _emit(queue, "log", level="info", message=f"Navigated to {start_url}")
 
-        # ── E2: Verify-then-act exploration loop ──────────────────────────────
-        # For each step:
-        #   1. Screenshot BEFORE
-        #   2. GPT-4V plans the action (with chain-of-thought reasoning)
-        #   3. Execute the action on the real browser
-        #   4. Screenshot AFTER
-        #   5. GPT-4V verifies: did it work? (compares before/after)
-        #   6. If verification fails → GPT reasons about why → corrected action → retry
-        #   Up to MAX_EXPLORE_RETRIES retries per step before moving on.
-        step_counter = 0
+        # SSO wall detection via MCP — two passes:
+        #   Pass 1: URL-based (catches redirects to SSO providers)
+        #   Pass 2: content-based (catches inline login forms where URL stays on app domain)
+        _current_url = await bridge.get_current_url()
+        await _emit(queue, "log", level="info", message=f"🌍 Current URL: {_current_url}")
+        _sso_by_url = any(s in _current_url.lower() for s in _sso_indicators)
+
+        _sso_by_content = False
+        try:
+            _login_check = await bridge.call_tool("browser_evaluate", {
+                "function": (
+                    "() => !!document.querySelector("
+                    "'input[type=\"password\"], input[name=\"j_username\"], "
+                    "input[id*=\"username\"], [id*=\"loginForm\"], [class*=\"login-form\"]')"
+                )
+            })
+            _sso_by_content = "true" in _login_check.get("text", "").lower()
+        except Exception:
+            pass
+
+        if _sso_by_url or _sso_by_content:
+            _reason = "URL matches SSO provider" if _sso_by_url else "login form detected on page"
+            _msg = (
+                f"🔒 Session expired or not authenticated ({_reason}). "
+                f"Current URL: {_current_url}. "
+                "Run 'npx ts-node scripts/auth.ts' in the terminal to refresh the session, then retry."
+            )
+            logger.warning(f"[EXPLORE {exploration_id}] {_msg}")
+            await _emit(queue, "log", level="error", message=_msg)
+
+        # ── [MCP] E1.5: Detect UI framework via browser_evaluate ──────────────
+        ui_framework = await _detect_ui_framework_mcp(bridge, req.test_case)
+        logger.info(f"[EXPLORE {exploration_id}] UI framework detected: {ui_framework}")
+        await _emit(queue, "log", level="info", message=f"UI framework: {ui_framework}")
+
+        # Load persisted learned rules for this framework
+        _persistent_rules = _get_active_rules(ui_framework)
+        learned_this_run: list = []
+        if _persistent_rules:
+            logger.info(f"[EXPLORE {exploration_id}] 📚 {len(_persistent_rules)} learned rule(s) loaded for {ui_framework}")
+            await _emit(queue, "log", level="info",
+                        message=f"📚 {len(_persistent_rules)} learned rule(s) loaded for {ui_framework}")
+
+        def _active_extra_rules() -> list:
+            return _persistent_rules + learned_this_run
+
+        # ══════════════════════════════════════════════════════════════════════
+        # [PLAYWRIGHT-CLI] E2: Direct Playwright verify-then-act loop
+        #
+        # This was the original step loop. For each step it:
+        #   1. Captured a screenshot + accessibility tree via Playwright page object
+        #   2. Called o4-mini to plan the action (plan prompt)
+        #   3. Executed via _execute_exploration_action(page, action, selector, value)
+        #   4. Captured an after-screenshot
+        #   5. Called o4-mini to verify success (before/after images)
+        #   6. On failure: refreshed a11y tree + DOM inspection + called o4-mini
+        #      with a correction prompt → retried up to MAX_EXPLORE_RETRIES times
+        #   7. Tracked last_failed_step for dependency-blocking of subsequent steps
+        #
+        # In MCP mode this entire loop is replaced by _run_step_with_mcp() which
+        # lets Azure OpenAI call browser tools directly in a function-calling loop.
+        # To restore Playwright CLI behavior: replace the [MCP] E2 block below
+        # with this block, and restore the direct browser launch in E1.
+        # ══════════════════════════════════════════════════════════════════════
+        # [PLAYWRIGHT-CLI] E2 step loop body starts here.
+        # Key functions it called (all still defined above with [PLAYWRIGHT-CLI] banners):
+        #   _get_accessibility_tree(page)         — a11y tree before each action
+        #   _plan_action_prompt(...)              — prompt: what action to take
+        #   _reasoning_vision_json(shot_b64, prompt) — o4-mini plan / verify calls
+        #   _execute_exploration_action(page, ...) — dispatches click/fill/navigate
+        #   _inspect_dom_for_correction(page, ...) — live DOM on failure
+        #   _analyse_page_visually(shot_b64, ...) — vision analysis on failure
+        #   _correction_prompt(...)               — retry prompt with DOM + vision
+        #   _verify_prompt(...)                   — before/after goal-check prompt
+        # To restore: re-enable the browser launch in [PLAYWRIGHT-CLI] E1, then
+        # replace the [MCP] E2 block below with the original _run_exploration body
+        # (available in git history before the MCP refactor commit).
+        # ─────────────────────────────────────────────────────────────────────
+        # [PLAYWRIGHT-CLI] step_counter  = 0
+        # [PLAYWRIGHT-CLI] last_failed_step: str = ""
+        # [PLAYWRIGHT-CLI] _sso_abort = False
+        # [PLAYWRIGHT-CLI] try:
+        # [PLAYWRIGHT-CLI]   for step in steps[:req.max_steps]:
+        # [PLAYWRIGHT-CLI]     ... (plan → execute → verify → correct retry loop)
+        # [PLAYWRIGHT-CLI]     ... see _execute_exploration_action / _verify_prompt
+        # [PLAYWRIGHT-CLI] except StopAsyncIteration:
+        # [PLAYWRIGHT-CLI]     _sso_abort = True
+
+        # [PLAYWRIGHT-CLI] # ── Option C: Dependency blocking ─────────────────────────────
+        # [PLAYWRIGHT-CLI] if last_failed_step:
+        # [PLAYWRIGHT-CLI] try:
+        # [PLAYWRIGHT-CLI] dependent = _is_dependent_step(last_failed_step, step_desc)
+        # [PLAYWRIGHT-CLI] except Exception:
+        # [PLAYWRIGHT-CLI] dependent = False
+        # [PLAYWRIGHT-CLI] if dependent:
+        # [PLAYWRIGHT-CLI] logger.warning(
+        # [PLAYWRIGHT-CLI] f"[EXPLORE {exploration_id}] Blocking step {step_counter} — "
+        # [PLAYWRIGHT-CLI] f"depends on failed: {last_failed_step[:50]}"
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] await _emit(queue, "step_start", step_num=step_counter,
+        # [PLAYWRIGHT-CLI] description=step_desc, path=step_path, total_steps=len(steps))
+        # [PLAYWRIGHT-CLI] await _emit(queue, "step_result", step_num=step_counter,
+        # [PLAYWRIGHT-CLI] description=step_desc, success=False, action="blocked",
+        # [PLAYWRIGHT-CLI] selector="", attempts=0,
+        # [PLAYWRIGHT-CLI] error=f"Blocked — depends on failed step: {last_failed_step[:80]}")
+        # [PLAYWRIGHT-CLI] steps_log.append({
+        # [PLAYWRIGHT-CLI] "step_num": step_counter, "description": step_desc,
+        # [PLAYWRIGHT-CLI] "action": "blocked", "selector": "", "success": False,
+        # [PLAYWRIGHT-CLI] "error": f"Blocked — depends on failed step: {last_failed_step[:80]}",
+        # [PLAYWRIGHT-CLI] "path": step_path, "path_taken": path_taken,
+        # [PLAYWRIGHT-CLI] "screenshot_file": "", "attempts": 0,
+        # [PLAYWRIGHT-CLI] })
+        # [PLAYWRIGHT-CLI] continue
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Cancellation check — stop cleanly between steps ────────────
+        # [PLAYWRIGHT-CLI] _cancel_flag = _explore_cancel.get(exploration_id)
+        # [PLAYWRIGHT-CLI] if _cancel_flag and _cancel_flag.is_set():
+        # [PLAYWRIGHT-CLI] logger.info(f"[EXPLORE {exploration_id}] 🛑 Cancelled by user at step {step_counter}")
+        # [PLAYWRIGHT-CLI] await _emit(queue, "log", level="warn",
+        # [PLAYWRIGHT-CLI] message=f"🛑 Exploration cancelled by user after {step_counter - 1} steps")
+        # [PLAYWRIGHT-CLI] break
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] await _emit(queue, "step_start", step_num=step_counter, description=step_desc,
+        # [PLAYWRIGHT-CLI] path=step_path, total_steps=len(steps))
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Before screenshot + Accessibility tree ────────────────────
+        # [PLAYWRIGHT-CLI] before_b64  = ""
+        # [PLAYWRIGHT-CLI] before_file = f"step-{step_counter:03d}-before.png"
+        # [PLAYWRIGHT-CLI] try:
+        # [PLAYWRIGHT-CLI] before_bytes = await page.screenshot(full_page=False)
+        # [PLAYWRIGHT-CLI] before_b64   = base64.b64encode(before_bytes).decode()
+        # [PLAYWRIGHT-CLI] (shots_dir / before_file).write_bytes(before_bytes)
+        # [PLAYWRIGHT-CLI] except Exception as se:
+        # [PLAYWRIGHT-CLI] logger.warning(f"[EXPLORE {exploration_id}] Before-screenshot failed: {se}")
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # Option A: get accessibility tree alongside screenshot
+        # [PLAYWRIGHT-CLI] a11y_tree = await _get_accessibility_tree(page)
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] history_ctx = "\n".join([
+        # [PLAYWRIGHT-CLI] f"Step {h['step_num']}: [{h.get('action','')}] {h.get('selector','')} — {h.get('observation','')}"
+        # [PLAYWRIGHT-CLI] for h in steps_log[-4:]
+        # [PLAYWRIGHT-CLI] ])
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Memory lookup — inject hints from past successful explorations ─
+        # [PLAYWRIGHT-CLI] current_domain = re.sub(r'https?://', '', page.url).split('/')[0]
+        # [PLAYWRIGHT-CLI] memory_hints   = _find_memory_hints(current_domain, step_desc)
+        # [PLAYWRIGHT-CLI] if memory_hints:
+        # [PLAYWRIGHT-CLI] logger.info(
+        # [PLAYWRIGHT-CLI] f"[EXPLORE {exploration_id}] Memory: {len(memory_hints)} hint(s) for step {step_counter} "
+        # [PLAYWRIGHT-CLI] f"— top: \"{memory_hints[0].get('selector','')}\" ({memory_hints[0].get('confidence','')})"
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] await _emit(queue, "memory_hint", step_num=step_counter,
+        # [PLAYWRIGHT-CLI] count=len(memory_hints),
+        # [PLAYWRIGHT-CLI] top_selector=memory_hints[0].get("selector",""),
+        # [PLAYWRIGHT-CLI] confidence=memory_hints[0].get("confidence",""))
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] log_entry = {
+        # [PLAYWRIGHT-CLI] "step_num":        step_counter,
+        # [PLAYWRIGHT-CLI] "description":     step_desc,
+        # [PLAYWRIGHT-CLI] "action":          "",
+        # [PLAYWRIGHT-CLI] "selector":        "",
+        # [PLAYWRIGHT-CLI] "value":           None,
+        # [PLAYWRIGHT-CLI] "observation":     "",
+        # [PLAYWRIGHT-CLI] "notes":           "",
+        # [PLAYWRIGHT-CLI] "confidence":      "low",
+        # [PLAYWRIGHT-CLI] "path":            step_path,
+        # [PLAYWRIGHT-CLI] "path_taken":      path_taken,
+        # [PLAYWRIGHT-CLI] "screenshot_file": before_file,
+        # [PLAYWRIGHT-CLI] "success":         False,
+        # [PLAYWRIGHT-CLI] "error":           None,
+        # [PLAYWRIGHT-CLI] "memory_hints_used": len(memory_hints),
+        # [PLAYWRIGHT-CLI] "read_value":      None,
+        # [PLAYWRIGHT-CLI] "attempts":        0,
+        # [PLAYWRIGHT-CLI] }
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] last_failure  = ""
+        # [PLAYWRIGHT-CLI] action_plan   = {}
+        # [PLAYWRIGHT-CLI] current_b64   = before_b64   # updated after each attempt
+        # [PLAYWRIGHT-CLI] selectors_this_step: list = []   # accumulates {action, selector, error} per attempt
+        # [PLAYWRIGHT-CLI] first_failed_selector = ""
+        # [PLAYWRIGHT-CLI] first_failed_error    = ""
+        # [PLAYWRIGHT-CLI] url_before_step = page.url    # for stuck-detection on navigation steps
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Proactive DOM inspection for attempt 0 ─────────────────────
+        # [PLAYWRIGHT-CLI] # Run upfront (not just on retry) when:
+        # [PLAYWRIGHT-CLI] #   1. Step type is "read" — column structure is unknowable without inspection
+        # [PLAYWRIGHT-CLI] #   2. Memory shows prior failures — model already struggled here before
+        # [PLAYWRIGHT-CLI] _has_prior_failures = any(h.get("failure_count", 0) > 0 for h in memory_hints)
+        # [PLAYWRIGHT-CLI] _needs_upfront_dom  = (step_type == "read") or _has_prior_failures
+        # [PLAYWRIGHT-CLI] upfront_dom_info    = ""
+        # [PLAYWRIGHT-CLI] upfront_vision      = ""
+        # [PLAYWRIGHT-CLI] if _needs_upfront_dom:
+        # [PLAYWRIGHT-CLI] upfront_dom_info = await _inspect_dom_for_correction(page, "", step_desc)
+        # [PLAYWRIGHT-CLI] upfront_vision   = _analyse_page_visually(before_b64, step_desc, "", "pre-inspection")
+        # [PLAYWRIGHT-CLI] if upfront_dom_info or upfront_vision:
+        # [PLAYWRIGHT-CLI] await _emit(queue, "log", level="info",
+        # [PLAYWRIGHT-CLI] message=f"🔬 DOM + 👁 vision pre-inspected for step {step_counter}")
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Retry loop ─────────────────────────────────────────────────
+        # [PLAYWRIGHT-CLI] for attempt in range(MAX_EXPLORE_RETRIES + 1):
+        # [PLAYWRIGHT-CLI] log_entry["attempts"] = attempt + 1
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Plan (or re-plan with reasoning on retry) ──────────────
+        # [PLAYWRIGHT-CLI] try:
+        # [PLAYWRIGHT-CLI] if attempt == 0:
+        # [PLAYWRIGHT-CLI] combined_upfront = "\n".join(filter(None, [upfront_dom_info, upfront_vision]))
+        # [PLAYWRIGHT-CLI] prompt = _plan_action_prompt(step_desc, step_type, page.url,
+        # [PLAYWRIGHT-CLI] history_ctx, memory_hints,
+        # [PLAYWRIGHT-CLI] a11y_tree, ui_framework,
+        # [PLAYWRIGHT-CLI] extra_rules=_active_extra_rules(),
+        # [PLAYWRIGHT-CLI] dom_info=combined_upfront)
+        # [PLAYWRIGHT-CLI] await _emit(queue, "log", level="info",
+        # [PLAYWRIGHT-CLI] message=f"Step {step_counter}: planning action…")
+        # [PLAYWRIGHT-CLI] else:
+        # [PLAYWRIGHT-CLI] logger.info(f"[EXPLORE {exploration_id}] Retry {attempt}/{MAX_EXPLORE_RETRIES}: {last_failure[:60]}")
+        # [PLAYWRIGHT-CLI] await _emit(queue, "retry", step_num=step_counter,
+        # [PLAYWRIGHT-CLI] attempt=attempt, max_attempts=MAX_EXPLORE_RETRIES+1,
+        # [PLAYWRIGHT-CLI] reason=last_failure[:120])
+        # [PLAYWRIGHT-CLI] # Refresh a11y tree for correction — page may have changed
+        # [PLAYWRIGHT-CLI] a11y_tree = await _get_accessibility_tree(page)
+        # [PLAYWRIGHT-CLI] # DOM inspection + vision analysis run together on every retry
+        # [PLAYWRIGHT-CLI] dom_info = await _inspect_dom_for_correction(page, selector, step_desc)
+        # [PLAYWRIGHT-CLI] page_analysis = _analyse_page_visually(
+        # [PLAYWRIGHT-CLI] current_b64, step_desc, selector, last_failure
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] if dom_info or page_analysis:
+        # [PLAYWRIGHT-CLI] await _emit(queue, "log", level="info",
+        # [PLAYWRIGHT-CLI] message=f"🔬 DOM + 👁 vision analysed — passing to model")
+        # [PLAYWRIGHT-CLI] if page_analysis:
+        # [PLAYWRIGHT-CLI] # Surface key lines to the live log
+        # [PLAYWRIGHT-CLI] for _line in page_analysis.splitlines()[1:5]:
+        # [PLAYWRIGHT-CLI] if _line.strip():
+        # [PLAYWRIGHT-CLI] await _emit(queue, "log", level="info",
+        # [PLAYWRIGHT-CLI] message=f"   👁 {_line.strip()}")
+        # [PLAYWRIGHT-CLI] prompt = _correction_prompt(step_desc, action_plan, last_failure,
+        # [PLAYWRIGHT-CLI] page.url, history_ctx,
+        # [PLAYWRIGHT-CLI] a11y_tree, ui_framework,
+        # [PLAYWRIGHT-CLI] extra_rules=_active_extra_rules(),
+        # [PLAYWRIGHT-CLI] dom_info=dom_info,
+        # [PLAYWRIGHT-CLI] page_analysis=page_analysis)
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] action_plan = _reasoning_vision_json(current_b64, prompt)
+        # [PLAYWRIGHT-CLI] except Exception as pe:
+        # [PLAYWRIGHT-CLI] logger.error(f"[EXPLORE {exploration_id}] Planning failed: {pe}")
+        # [PLAYWRIGHT-CLI] log_entry["error"] = f"Planning error: {pe}"
+        # [PLAYWRIGHT-CLI] break
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] action   = action_plan.get("action", "done")
+        # [PLAYWRIGHT-CLI] selector = action_plan.get("selector", "")
+        # [PLAYWRIGHT-CLI] value    = action_plan.get("value")
+        # [PLAYWRIGHT-CLI] pdec     = action_plan.get("path_decision")
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] log_entry.update({
+        # [PLAYWRIGHT-CLI] "action":     action,
+        # [PLAYWRIGHT-CLI] "selector":   selector,
+        # [PLAYWRIGHT-CLI] "value":      value,
+        # [PLAYWRIGHT-CLI] "observation": action_plan.get("observation", ""),
+        # [PLAYWRIGHT-CLI] "notes":      action_plan.get("notes", ""),
+        # [PLAYWRIGHT-CLI] "confidence": action_plan.get("confidence", "medium"),
+        # [PLAYWRIGHT-CLI] })
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] if pdec and path_taken is None:
+        # [PLAYWRIGHT-CLI] path_taken = pdec
+        # [PLAYWRIGHT-CLI] log_entry["path_taken"] = path_taken
+        # [PLAYWRIGHT-CLI] logger.info(f"[EXPLORE {exploration_id}] Path decision → {path_taken}")
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # FIX 1: "done" is NOT auto-success — verify the goal was achieved.
+        # [PLAYWRIGHT-CLI] # The model uses "done" as an escape hatch when it can't find elements.
+        # [PLAYWRIGHT-CLI] # We verify with a goal-check before accepting it.
+        # [PLAYWRIGHT-CLI] if action == "decision":
+        # [PLAYWRIGHT-CLI] log_entry["success"] = True
+        # [PLAYWRIGHT-CLI] logger.info(f"[EXPLORE {exploration_id}] ✅ Step {step_counter}: path decision")
+        # [PLAYWRIGHT-CLI] break
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] if action == "done":
+        # [PLAYWRIGHT-CLI] # Ask GPT-4V: was the actual goal of this step achieved?
+        # [PLAYWRIGHT-CLI] goal_check_prompt = f"""The model says this step is already done: "{step_desc}"
+        # [PLAYWRIGHT-CLI] Look at the screenshot carefully.
+        # [PLAYWRIGHT-CLI] Is there clear visual evidence that this goal HAS actually been accomplished on this page?
+        # [PLAYWRIGHT-CLI] Return ONLY raw JSON: {{"achieved": true|false, "reason": "what you see that confirms or denies it"}}"""
+        # [PLAYWRIGHT-CLI] try:
+        # [PLAYWRIGHT-CLI] goal_resp = _reasoning_vision_json(current_b64, goal_check_prompt)
+        # [PLAYWRIGHT-CLI] if goal_resp.get("achieved", False):
+        # [PLAYWRIGHT-CLI] log_entry["success"] = True
+        # [PLAYWRIGHT-CLI] log_entry["observation"] = goal_resp.get("reason", "")
+        # [PLAYWRIGHT-CLI] logger.info(f"[EXPLORE {exploration_id}] ✅ Step {step_counter}: goal confirmed done")
+        # [PLAYWRIGHT-CLI] break
+        # [PLAYWRIGHT-CLI] else:
+        # [PLAYWRIGHT-CLI] # Goal NOT achieved — treat as failure and retry
+        # [PLAYWRIGHT-CLI] last_failure = (
+        # [PLAYWRIGHT-CLI] f"Model said 'done' but goal was not achieved: "
+        # [PLAYWRIGHT-CLI] f"{goal_resp.get('reason', 'Goal not visible on page')}. "
+        # [PLAYWRIGHT-CLI] f"You MUST find and interact with an element to accomplish this step."
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] logger.warning(f"[EXPLORE {exploration_id}] 'done' rejected — {last_failure[:80]}")
+        # [PLAYWRIGHT-CLI] if attempt >= MAX_EXPLORE_RETRIES:
+        # [PLAYWRIGHT-CLI] log_entry["error"] = last_failure
+        # [PLAYWRIGHT-CLI] continue
+        # [PLAYWRIGHT-CLI] except Exception:
+        # [PLAYWRIGHT-CLI] # If goal-check fails to parse, give benefit of the doubt
+        # [PLAYWRIGHT-CLI] log_entry["success"] = True
+        # [PLAYWRIGHT-CLI] break
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── SSO drift guard — abort if we've drifted to a login page ──
+        # [PLAYWRIGHT-CLI] _pre_exec_url = page.url.lower()
+        # [PLAYWRIGHT-CLI] if any(s in _pre_exec_url for s in _sso_indicators):
+        # [PLAYWRIGHT-CLI] _drift_msg = (
+        # [PLAYWRIGHT-CLI] "🔒 Session expired mid-run — browser is on a login/SSO page. "
+        # [PLAYWRIGHT-CLI] "Run 'npx ts-node scripts/auth.ts' to refresh the session, then retry."
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] logger.error(f"[EXPLORE {exploration_id}] SSO drift detected at step {step_counter}")
+        # [PLAYWRIGHT-CLI] await _emit(queue, "log", level="error", message=_drift_msg)
+        # [PLAYWRIGHT-CLI] log_entry["error"] = _drift_msg
+        # [PLAYWRIGHT-CLI] log_entry["success"] = False
+        # [PLAYWRIGHT-CLI] steps_log.append(log_entry)
+        # [PLAYWRIGHT-CLI] # Mark all remaining steps as blocked and exit the step loop
+        # [PLAYWRIGHT-CLI] last_failed_step = "SSO session expired — browser redirected to login page"
+        # [PLAYWRIGHT-CLI] raise StopAsyncIteration(_drift_msg)
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Execute ────────────────────────────────────────────────
+        # [PLAYWRIGHT-CLI] exec_error = None
+        # [PLAYWRIGHT-CLI] read_val   = None
+        # [PLAYWRIGHT-CLI] try:
+        # [PLAYWRIGHT-CLI] read_val = await _execute_exploration_action(page, action, selector, value)
+        # [PLAYWRIGHT-CLI] if read_val is not None:
+        # [PLAYWRIGHT-CLI] log_entry["read_value"] = read_val
+        # [PLAYWRIGHT-CLI] logger.info(f"[EXPLORE {exploration_id}] Read: '{read_val}'")
+        # [PLAYWRIGHT-CLI] except Exception as ae:
+        # [PLAYWRIGHT-CLI] exec_error = str(ae)[:300]
+        # [PLAYWRIGHT-CLI] logger.warning(f"[EXPLORE {exploration_id}] Exec error attempt {attempt+1}: {ae}")
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── After screenshot ───────────────────────────────────────
+        # [PLAYWRIGHT-CLI] after_b64   = ""
+        # [PLAYWRIGHT-CLI] after_file  = f"step-{step_counter:03d}-after-a{attempt+1}.png"
+        # [PLAYWRIGHT-CLI] try:
+        # [PLAYWRIGHT-CLI] after_bytes = await page.screenshot(full_page=False)
+        # [PLAYWRIGHT-CLI] after_b64   = base64.b64encode(after_bytes).decode()
+        # [PLAYWRIGHT-CLI] (shots_dir / after_file).write_bytes(after_bytes)
+        # [PLAYWRIGHT-CLI] except Exception:
+        # [PLAYWRIGHT-CLI] pass
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Verify ─────────────────────────────────────────────────
+        # [PLAYWRIGHT-CLI] url_after = page.url
+        # [PLAYWRIGHT-CLI] if exec_error:
+        # [PLAYWRIGHT-CLI] last_failure = (
+        # [PLAYWRIGHT-CLI] f"Playwright raised an error executing {action} on '{selector}': "
+        # [PLAYWRIGHT-CLI] f"{exec_error}. The selector may not exist, be hidden, or need scrolling."
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] verification_ok = False
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] elif action == "wait":
+        # [PLAYWRIGHT-CLI] verification_ok = True
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] elif action in ("navigate", "read"):
+        # [PLAYWRIGHT-CLI] if action == "navigate" and step_type in ("navigate",) and url_after == url_before_step:
+        # [PLAYWRIGHT-CLI] # If URL didn't change, check whether we were already at the target
+        # [PLAYWRIGHT-CLI] nav_target = (value or selector or "").split("?")[0].rstrip("/")
+        # [PLAYWRIGHT-CLI] current_base = url_after.split("?")[0].rstrip("/")
+        # [PLAYWRIGHT-CLI] already_there = nav_target and current_base.startswith(nav_target)
+        # [PLAYWRIGHT-CLI] if already_there:
+        # [PLAYWRIGHT-CLI] # Already at destination — treat as success
+        # [PLAYWRIGHT-CLI] verification_ok = True
+        # [PLAYWRIGHT-CLI] log_entry["observation"] = f"Already at destination: {url_after}"
+        # [PLAYWRIGHT-CLI] else:
+        # [PLAYWRIGHT-CLI] last_failure = (
+        # [PLAYWRIGHT-CLI] f"Navigation executed but URL did not change "
+        # [PLAYWRIGHT-CLI] f"(still {url_after}). Page may not have responded."
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] verification_ok = False
+        # [PLAYWRIGHT-CLI] else:
+        # [PLAYWRIGHT-CLI] verification_ok = True
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] else:
+        # [PLAYWRIGHT-CLI] # FIX 3: Goal-based verification — did the STEP GOAL get achieved?
+        # [PLAYWRIGHT-CLI] try:
+        # [PLAYWRIGHT-CLI] v_prompt = f"""You are verifying whether a browser step succeeded.
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] STEP GOAL: {step_desc}
+        # [PLAYWRIGHT-CLI] ACTION TAKEN: {action} on "{selector}" {f'with value "{value}"' if value else ''}
+        # [PLAYWRIGHT-CLI] URL BEFORE: {url_before_step}
+        # [PLAYWRIGHT-CLI] URL AFTER: {url_after}
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] You have BEFORE (first image) and AFTER (second image) screenshots.
+        # [PLAYWRIGHT-CLI] Judge whether the GOAL of the step was achieved — not just whether something changed.
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] Return ONLY raw JSON:
+        # [PLAYWRIGHT-CLI] {{
+        # [PLAYWRIGHT-CLI] "success": true|false,
+        # [PLAYWRIGHT-CLI] "observation": "what changed and whether the goal was met",
+        # [PLAYWRIGHT-CLI] "correction_hint": "if failed: exactly what went wrong and what to try instead (different selector, scroll first, element inside iframe, need to wait longer, etc.)"
+        # [PLAYWRIGHT-CLI] }}
+        # [PLAYWRIGHT-CLI] Be strict: success=true only if there is clear visual evidence the step GOAL was accomplished."""
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] v_content = [
+        # [PLAYWRIGHT-CLI] {"type": "text", "text": "BEFORE:"},
+        # [PLAYWRIGHT-CLI] {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_b64}"}},
+        # [PLAYWRIGHT-CLI] {"type": "text", "text": "AFTER:"},
+        # [PLAYWRIGHT-CLI] {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{after_b64}"}},
+        # [PLAYWRIGHT-CLI] {"type": "text", "text": v_prompt},
+        # [PLAYWRIGHT-CLI] ]
+        # [PLAYWRIGHT-CLI] v_kwargs: dict = {
+        # [PLAYWRIGHT-CLI] "model":    REASONING_DEPLOYMENT,
+        # [PLAYWRIGHT-CLI] "messages": [{"role": "user", "content": v_content}],
+        # [PLAYWRIGHT-CLI] }
+        # [PLAYWRIGHT-CLI] if REASONING_DEPLOYMENT != DEPLOYMENT:
+        # [PLAYWRIGHT-CLI] v_kwargs["max_completion_tokens"] = 800
+        # [PLAYWRIGHT-CLI] else:
+        # [PLAYWRIGHT-CLI] v_kwargs["max_tokens"]  = 300
+        # [PLAYWRIGHT-CLI] v_kwargs["temperature"] = 0.1
+        # [PLAYWRIGHT-CLI] v_raw = reasoning_client.chat.completions.create(
+        # [PLAYWRIGHT-CLI] **v_kwargs
+        # [PLAYWRIGHT-CLI] ).choices[0].message.content.strip()
+        # [PLAYWRIGHT-CLI] v_raw = re.sub(r"```(?:json)?[\n]?", "", v_raw).strip().rstrip("`").strip()
+        # [PLAYWRIGHT-CLI] verification = json.loads(v_raw)
+        # [PLAYWRIGHT-CLI] verification_ok = verification.get("success", False)
+        # [PLAYWRIGHT-CLI] log_entry["observation"] = verification.get("observation", log_entry["observation"])
+        # [PLAYWRIGHT-CLI] if not verification_ok:
+        # [PLAYWRIGHT-CLI] last_failure = verification.get("correction_hint", "Action had no visible effect on goal")
+        # [PLAYWRIGHT-CLI] except Exception as ve:
+        # [PLAYWRIGHT-CLI] logger.warning(f"[EXPLORE {exploration_id}] Verification parse error: {ve}")
+        # [PLAYWRIGHT-CLI] verification_ok = True  # give benefit of the doubt on parse failure
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] if verification_ok:
+        # [PLAYWRIGHT-CLI] log_entry["success"]         = True
+        # [PLAYWRIGHT-CLI] log_entry["screenshot_file"] = after_file
+        # [PLAYWRIGHT-CLI] logger.info(
+        # [PLAYWRIGHT-CLI] f"[EXPLORE {exploration_id}] ✅ Step {step_counter} "
+        # [PLAYWRIGHT-CLI] f"(attempt {attempt+1}): {action} {selector[:40] if selector else ''}"
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] await _emit(queue, "step_result",
+        # [PLAYWRIGHT-CLI] step_num=step_counter,
+        # [PLAYWRIGHT-CLI] description=step_desc,
+        # [PLAYWRIGHT-CLI] success=True,
+        # [PLAYWRIGHT-CLI] action=action,
+        # [PLAYWRIGHT-CLI] selector=selector,
+        # [PLAYWRIGHT-CLI] value=value,
+        # [PLAYWRIGHT-CLI] observation=log_entry.get("observation",""),
+        # [PLAYWRIGHT-CLI] attempts=attempt+1,
+        # [PLAYWRIGHT-CLI] read_value=log_entry.get("read_value"))
+        # [PLAYWRIGHT-CLI] # ── Record success to selector memory (skip SSO pages) ─
+        # [PLAYWRIGHT-CLI] if not any(s in current_domain for s in _sso_indicators):
+        # [PLAYWRIGHT-CLI] _record_selector_outcome(
+        # [PLAYWRIGHT-CLI] current_domain, step_desc, action, selector, value, success=True
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] # ── Learn from correction: extract rule when retry fixed it ─
+        # [PLAYWRIGHT-CLI] if attempt > 0 and first_failed_selector and selector != first_failed_selector:
+        # [PLAYWRIGHT-CLI] rule = _extract_rule_from_correction(
+        # [PLAYWRIGHT-CLI] step_desc, first_failed_selector, first_failed_error,
+        # [PLAYWRIGHT-CLI] selector, ui_framework, exploration_id
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] if rule and _persist_learned_rule(rule, ui_framework):
+        # [PLAYWRIGHT-CLI] learned_this_run.append(rule["rule"])
+        # [PLAYWRIGHT-CLI] logger.info(f"[EXPLORE {exploration_id}] 📚 Learned correction rule: {rule['rule'][:70]}")
+        # [PLAYWRIGHT-CLI] await _emit(queue, "log", level="info",
+        # [PLAYWRIGHT-CLI] message=f"📚 Learned: {rule['rule'][:100]}")
+        # [PLAYWRIGHT-CLI] break
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # ── Record failed selector attempt (skip SSO pages) ────────
+        # [PLAYWRIGHT-CLI] if not any(s in current_domain for s in _sso_indicators):
+        # [PLAYWRIGHT-CLI] _record_selector_outcome(
+        # [PLAYWRIGHT-CLI] current_domain, step_desc, action, selector, value, success=False
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] selectors_this_step.append({"action": action, "selector": selector, "error": last_failure})
+        # [PLAYWRIGHT-CLI] if attempt == 0:
+        # [PLAYWRIGHT-CLI] first_failed_selector = selector
+        # [PLAYWRIGHT-CLI] first_failed_error    = last_failure
+        # [PLAYWRIGHT-CLI]
+        # [PLAYWRIGHT-CLI] # Verification failed — prepare for next retry
+        # [PLAYWRIGHT-CLI] current_b64 = after_b64 or current_b64
+        # [PLAYWRIGHT-CLI] if attempt >= MAX_EXPLORE_RETRIES:
+        # [PLAYWRIGHT-CLI] log_entry["error"] = f"Failed after {MAX_EXPLORE_RETRIES+1} attempts: {last_failure}"
+        # [PLAYWRIGHT-CLI] # ── Learn from failure: extract rule after all retries exhausted ─
+        # [PLAYWRIGHT-CLI] if selectors_this_step:
+        # [PLAYWRIGHT-CLI] rule = _extract_rule_from_failure(
+        # [PLAYWRIGHT-CLI] step_desc, selectors_this_step, ui_framework, exploration_id
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] if rule and _persist_learned_rule(rule, ui_framework):
+        # [PLAYWRIGHT-CLI] learned_this_run.append(rule["rule"])
+        # [PLAYWRIGHT-CLI] logger.info(f"[EXPLORE {exploration_id}] 📚 Learned failure rule: {rule['rule'][:70]}")
+        # [PLAYWRIGHT-CLI] await _emit(queue, "log", level="info",
+        # [PLAYWRIGHT-CLI] message=f"📚 Learned: {rule['rule'][:100]}")
+        # [PLAYWRIGHT-CLI] await _emit(queue, "step_result",
+        # [PLAYWRIGHT-CLI] step_num=step_counter,
+        # [PLAYWRIGHT-CLI] description=step_desc,
+        # [PLAYWRIGHT-CLI] success=False,
+        # [PLAYWRIGHT-CLI] action=action,
+        # [PLAYWRIGHT-CLI] selector=selector,
+        # [PLAYWRIGHT-CLI] attempts=attempt+1,
+        # [PLAYWRIGHT-CLI] error=log_entry["error"])
+        # [PLAYWRIGHT-CLI] logger.warning(
+        # [PLAYWRIGHT-CLI] f"[EXPLORE {exploration_id}] ❌ Step {step_counter} exhausted retries: {last_failure[:80]}"
+        # [PLAYWRIGHT-CLI] )
+        # [PLAYWRIGHT-CLI] # Option C: record this step as the last failure for dependency checks
+        # [PLAYWRIGHT-CLI] last_failed_step = step_desc
+
+        # ── [MCP] E2: Step loop via PlaywrightMCPBridge + Azure OpenAI tool-use ──
+        # Each step is handed to _run_step_with_mcp(), which runs an Azure OpenAI
+        # function-calling conversation. The model calls browser_snapshot, browser_click,
+        # browser_fill, etc. directly and returns a JSON result when done.
+        # The step log format is identical to the Playwright CLI loop so E3 (MD
+        # generation) and all downstream code are unchanged.
+        step_counter      = 0
+        last_failed_step  = ""   # most-recent failed/blocked (propagates the chain)
+        last_root_failure = ""   # original cause — only set on actual step failures
+
         for step in steps[:req.max_steps]:
             step_id   = step.get("id", step_counter + 1)
             step_desc = step.get("description", "")
@@ -2536,256 +4622,329 @@ async def explore_test_case(req: ExploreRequest):
                 continue
 
             step_counter += 1
-            logger.info(f"[EXPLORE {exploration_id}] Step {step_counter}: {step_desc[:60]}")
+            logger.info(f"[EXPLORE {exploration_id}] [MCP] Step {step_counter}: {step_desc[:70]}")
 
-            # ── Before screenshot ──────────────────────────────────────────
-            before_b64  = ""
-            before_file = f"step-{step_counter:03d}-before.png"
-            try:
-                before_bytes = await page.screenshot(full_page=False)
-                before_b64   = base64.b64encode(before_bytes).decode()
-                (shots_dir / before_file).write_bytes(before_bytes)
-            except Exception as se:
-                logger.warning(f"[EXPLORE {exploration_id}] Before-screenshot failed: {se}")
+            # Dependency blocking — check against the immediate predecessor AND the
+            # root cause. The root ensures parallel steps (e.g. "read col4" / "read col5")
+            # that share a common prerequisite are both blocked even if they don't depend
+            # on each other directly.
+            if last_failed_step:
+                try:
+                    dependent = _is_dependent_step(last_failed_step, step_desc)
+                except Exception:
+                    dependent = False
+                # If immediate check passes, also check against the root failure
+                if not dependent and last_root_failure and last_root_failure != last_failed_step:
+                    try:
+                        dependent = _is_dependent_step(last_root_failure, step_desc)
+                    except Exception:
+                        dependent = False
+                if dependent:
+                    logger.warning(
+                        f"[EXPLORE {exploration_id}] Blocking step {step_counter} — "
+                        f"depends on failed: {last_failed_step[:60]}"
+                    )
+                    await _emit(queue, "step_start", step_num=step_counter,
+                                description=step_desc, path=step_path, total_steps=len(steps))
+                    await _emit(queue, "step_result", step_num=step_counter,
+                                description=step_desc, success=False, action="blocked",
+                                selector="", attempts=0,
+                                error=f"Blocked — depends on failed step: {last_failed_step[:80]}")
+                    steps_log.append({
+                        "step_num": step_counter, "description": step_desc,
+                        "action": "blocked", "selector": "", "success": False,
+                        "error": f"Blocked — depends on failed step: {last_failed_step[:80]}",
+                        "path": step_path, "path_taken": path_taken,
+                        "screenshot_file": "", "attempts": 0,
+                    })
+                    # Propagate block chain — blocked steps count as failures for
+                    # subsequent dependency checks so transitive deps are also blocked
+                    last_failed_step = step_desc
+                    continue
 
+            # Cancellation check
+            _cancel_flag = _explore_cancel.get(exploration_id)
+            if _cancel_flag and _cancel_flag.is_set():
+                logger.info(f"[EXPLORE {exploration_id}] 🛑 Cancelled at step {step_counter}")
+                await _emit(queue, "log", level="warn",
+                            message=f"🛑 Cancelled by user after {step_counter - 1} steps")
+                break
+
+            await _emit(queue, "step_start", step_num=step_counter, description=step_desc,
+                        path=step_path, total_steps=len(steps))
+
+            # Build history context from last 4 steps
             history_ctx = "\n".join([
                 f"Step {h['step_num']}: [{h.get('action','')}] {h.get('selector','')} — {h.get('observation','')}"
                 for h in steps_log[-4:]
             ])
 
-            # ── Memory lookup — inject hints from past successful explorations ─
-            current_domain = re.sub(r'https?://', '', page.url).split('/')[0]
+            # Memory hints from past explorations
+            current_domain = re.sub(r'https?://', '', await bridge.get_current_url()).split('/')[0]
             memory_hints   = _find_memory_hints(current_domain, step_desc)
             if memory_hints:
                 logger.info(
-                    f"[EXPLORE {exploration_id}] Memory: {len(memory_hints)} hint(s) for step {step_counter} "
+                    f"[EXPLORE {exploration_id}] Memory: {len(memory_hints)} hint(s) "
                     f"— top: \"{memory_hints[0].get('selector','')}\" ({memory_hints[0].get('confidence','')})"
                 )
+                await _emit(queue, "memory_hint", step_num=step_counter,
+                            count=len(memory_hints),
+                            top_selector=memory_hints[0].get("selector", ""),
+                            confidence=memory_hints[0].get("confidence", ""))
 
-            log_entry = {
-                "step_num":        step_counter,
-                "description":     step_desc,
-                "action":          "",
-                "selector":        "",
-                "value":           None,
-                "observation":     "",
-                "notes":           "",
-                "confidence":      "low",
-                "path":            step_path,
-                "path_taken":      path_taken,
-                "screenshot_file": before_file,
-                "success":         False,
-                "error":           None,
-                "memory_hints_used": len(memory_hints),
-                "read_value":      None,
-                "attempts":        0,
-            }
+            # Capture URL before running the step (for stuck-detection + verify)
+            url_before_step = ""
+            try:
+                url_before_step = await bridge.get_current_url()
+            except Exception:
+                pass
 
-            last_failure  = ""
-            action_plan   = {}
-            current_b64   = before_b64   # updated after each attempt
-            url_before_step = page.url    # for stuck-detection on navigation steps
+            # Run the step via MCP function-calling loop
+            step_result = await _run_step_with_mcp(
+                bridge, step_desc, step_type, history_ctx, memory_hints,
+                ui_framework, _active_extra_rules(), exploration_id,
+                step_counter, shots_dir, queue,
+            )
 
-            # ── Retry loop ─────────────────────────────────────────────────
-            for attempt in range(MAX_EXPLORE_RETRIES + 1):
-                log_entry["attempts"] = attempt + 1
-
-                # ── Plan (or re-plan with reasoning on retry) ──────────────
+            # ── Explicit VERIFY phase — separate LLM call with after-screenshot ──
+            # Mirrors the old CLI _verify_prompt pattern. Only skip for steps that
+            # clearly failed at the tool level (no action attempted).
+            _attempts    = 1
+            action_raw   = step_result.get("action", "")
+            url_after_step        = ""    # populated below if verify runs; used by retry guard
+            _verify_overrode_model = False  # True when verify flipped model's ✅ to ❌
+            if action_raw not in ("failed", "blocked", ""):
+                await _emit(queue, "log", level="info",
+                            message=f"🔎 Verifying step {step_counter}…")
+                url_after_step = ""
+                after_b64_verify = None
                 try:
-                    if attempt == 0:
-                        prompt = _plan_action_prompt(step_desc, step_type, page.url,
-                                                     history_ctx, memory_hints)
-                    else:
-                        logger.info(f"[EXPLORE {exploration_id}] Retry {attempt}/{MAX_EXPLORE_RETRIES}: {last_failure[:60]}")
-                        prompt = _correction_prompt(step_desc, action_plan, last_failure, page.url, history_ctx)
-
-                    action_plan = _reasoning_vision_json(current_b64, prompt)
-                except Exception as pe:
-                    logger.error(f"[EXPLORE {exploration_id}] Planning failed: {pe}")
-                    log_entry["error"] = f"Planning error: {pe}"
-                    break
-
-                action   = action_plan.get("action", "done")
-                selector = action_plan.get("selector", "")
-                value    = action_plan.get("value")
-                pdec     = action_plan.get("path_decision")
-
-                log_entry.update({
-                    "action":     action,
-                    "selector":   selector,
-                    "value":      value,
-                    "observation": action_plan.get("observation", ""),
-                    "notes":      action_plan.get("notes", ""),
-                    "confidence": action_plan.get("confidence", "medium"),
-                })
-
-                if pdec and path_taken is None:
-                    path_taken = pdec
-                    log_entry["path_taken"] = path_taken
-                    logger.info(f"[EXPLORE {exploration_id}] Path decision → {path_taken}")
-
-                # FIX 1: "done" is NOT auto-success — verify the goal was achieved.
-                # The model uses "done" as an escape hatch when it can't find elements.
-                # We verify with a goal-check before accepting it.
-                if action == "decision":
-                    log_entry["success"] = True
-                    logger.info(f"[EXPLORE {exploration_id}] ✅ Step {step_counter}: path decision")
-                    break
-
-                if action == "done":
-                    # Ask GPT-4V: was the actual goal of this step achieved?
-                    goal_check_prompt = f"""The model says this step is already done: "{step_desc}"
-Look at the screenshot carefully.
-Is there clear visual evidence that this goal HAS actually been accomplished on this page?
-Return ONLY raw JSON: {{"achieved": true|false, "reason": "what you see that confirms or denies it"}}"""
-                    try:
-                        goal_resp = _reasoning_vision_json(current_b64, goal_check_prompt)
-                        if goal_resp.get("achieved", False):
-                            log_entry["success"] = True
-                            log_entry["observation"] = goal_resp.get("reason", "")
-                            logger.info(f"[EXPLORE {exploration_id}] ✅ Step {step_counter}: goal confirmed done")
-                            break
-                        else:
-                            # Goal NOT achieved — treat as failure and retry
-                            last_failure = (
-                                f"Model said 'done' but goal was not achieved: "
-                                f"{goal_resp.get('reason', 'Goal not visible on page')}. "
-                                f"You MUST find and interact with an element to accomplish this step."
-                            )
-                            logger.warning(f"[EXPLORE {exploration_id}] 'done' rejected — {last_failure[:80]}")
-                            if attempt >= MAX_EXPLORE_RETRIES:
-                                log_entry["error"] = last_failure
-                            continue
-                    except Exception:
-                        # If goal-check fails to parse, give benefit of the doubt
-                        log_entry["success"] = True
-                        break
-
-                # ── Execute ────────────────────────────────────────────────
-                exec_error = None
-                read_val   = None
-                try:
-                    read_val = await _execute_exploration_action(page, action, selector, value)
-                    if read_val is not None:
-                        log_entry["read_value"] = read_val
-                        logger.info(f"[EXPLORE {exploration_id}] Read: '{read_val}'")
-                except Exception as ae:
-                    exec_error = str(ae)[:300]
-                    logger.warning(f"[EXPLORE {exploration_id}] Exec error attempt {attempt+1}: {ae}")
-
-                # ── After screenshot ───────────────────────────────────────
-                after_b64   = ""
-                after_file  = f"step-{step_counter:03d}-after-a{attempt+1}.png"
-                try:
-                    after_bytes = await page.screenshot(full_page=False)
-                    after_b64   = base64.b64encode(after_bytes).decode()
-                    (shots_dir / after_file).write_bytes(after_bytes)
-                except Exception:
-                    pass
-
-                # ── Verify ─────────────────────────────────────────────────
-                url_after = page.url
-                if exec_error:
-                    last_failure = (
-                        f"Playwright raised an error executing {action} on '{selector}': "
-                        f"{exec_error}. The selector may not exist, be hidden, or need scrolling."
-                    )
-                    verification_ok = False
-
-                elif action == "wait":
-                    verification_ok = True
-
-                elif action in ("navigate", "read"):
-                    # FIX 2: For navigation steps, verify the URL actually changed
-                    if action == "navigate" and step_type in ("navigate",) and url_after == url_before_step:
-                        last_failure = (
-                            f"Navigation action executed but URL did not change "
-                            f"(still {url_after}). The page may not have responded to the action."
+                    # Take screenshot first — gives in-flight navigations time to settle,
+                    # then capture URL so it reflects the final landed page.
+                    _vshot = await bridge.call_tool("browser_take_screenshot", {})
+                    url_after_step = await bridge.get_current_url()
+                    after_b64_verify = _vshot.get("screenshot_b64")
+                    if after_b64_verify and shots_dir:
+                        _vfname = f"step-{step_counter:03d}-verify.png"
+                        (shots_dir / _vfname).write_bytes(
+                            __import__("base64").b64decode(after_b64_verify)
                         )
-                        verification_ok = False
-                    else:
-                        verification_ok = True
+                        step_result.setdefault("screenshot_file", _vfname)
+                except Exception as _ve:
+                    logger.warning(f"[EXPLORE {exploration_id}] After-screenshot for verify failed: {_ve}")
 
-                else:
-                    # FIX 3: Goal-based verification — did the STEP GOAL get achieved?
-                    try:
-                        v_prompt = f"""You are verifying whether a browser step succeeded.
-
-STEP GOAL: {step_desc}
-ACTION TAKEN: {action} on "{selector}" {f'with value "{value}"' if value else ''}
-URL BEFORE: {url_before_step}
-URL AFTER: {url_after}
-
-You have BEFORE (first image) and AFTER (second image) screenshots.
-Judge whether the GOAL of the step was achieved — not just whether something changed.
-
-Return ONLY raw JSON:
-{{
-  "success": true|false,
-  "observation": "what changed and whether the goal was met",
-  "correction_hint": "if failed: exactly what went wrong and what to try instead (different selector, scroll first, element inside iframe, need to wait longer, etc.)"
-}}
-Be strict: success=true only if there is clear visual evidence the step GOAL was accomplished."""
-
-                        v_content = [
-                            {"type": "text", "text": "BEFORE:"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_b64}"}},
-                            {"type": "text", "text": "AFTER:"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{after_b64}"}},
-                            {"type": "text", "text": v_prompt},
-                        ]
-                        v_kwargs: dict = {
-                            "model":    REASONING_DEPLOYMENT,
-                            "messages": [{"role": "user", "content": v_content}],
-                        }
-                        if REASONING_DEPLOYMENT != DEPLOYMENT:
-                            v_kwargs["max_completion_tokens"] = 800
-                        else:
-                            v_kwargs["max_tokens"]  = 300
-                            v_kwargs["temperature"] = 0.1
-                        v_raw = reasoning_client.chat.completions.create(
-                            **v_kwargs
-                        ).choices[0].message.content.strip()
-                        v_raw = re.sub(r"```(?:json)?[\n]?", "", v_raw).strip().rstrip("`").strip()
-                        verification = json.loads(v_raw)
-                        verification_ok = verification.get("success", False)
-                        log_entry["observation"] = verification.get("observation", log_entry["observation"])
-                        if not verification_ok:
-                            last_failure = verification.get("correction_hint", "Action had no visible effect on goal")
-                    except Exception as ve:
-                        logger.warning(f"[EXPLORE {exploration_id}] Verification parse error: {ve}")
-                        verification_ok = True  # give benefit of the doubt on parse failure
-
-                if verification_ok:
-                    log_entry["success"]         = True
-                    log_entry["screenshot_file"] = after_file
-                    logger.info(
-                        f"[EXPLORE {exploration_id}] ✅ Step {step_counter} "
-                        f"(attempt {attempt+1}): {action} {selector[:40] if selector else ''}"
-                    )
-                    # ── Record success to selector memory ─────────────────
-                    _record_selector_outcome(
-                        current_domain, step_desc, action, selector, value, success=True
-                    )
-                    break
-
-                # ── Record failed selector attempt ─────────────────────────
-                _record_selector_outcome(
-                    current_domain, step_desc, action, selector, value, success=False
+                verified = await _verify_step_mcp(
+                    step_desc, action_raw,
+                    step_result.get("selector", ""),
+                    url_before_step, url_after_step,
+                    after_b64_verify, step_result,
                 )
 
-                # Verification failed — prepare for next retry
-                current_b64 = after_b64 or current_b64
-                if attempt >= MAX_EXPLORE_RETRIES:
-                    log_entry["error"] = f"Failed after {MAX_EXPLORE_RETRIES+1} attempts: {last_failure}"
-                    logger.warning(
-                        f"[EXPLORE {exploration_id}] ❌ Step {step_counter} exhausted retries: {last_failure[:80]}"
+                model_success  = step_result.get("success", False)
+                verify_success = verified.get("success", model_success)
+                _verify_overrode_model = (verify_success != model_success)
+                if _verify_overrode_model:
+                    await _emit(queue, "log", level="warn",
+                                message=(
+                                    f"⚖️ Verify override: model={'✅' if model_success else '❌'} → "
+                                    f"verify={'✅' if verify_success else '❌'} — "
+                                    f"{verified.get('observation', '')[:80]}"
+                                ))
+                    logger.info(
+                        f"[EXPLORE {exploration_id}] Verify override step {step_counter}: "
+                        f"model={model_success} → verify={verify_success}"
                     )
+                step_result = verified
+
+            # ── Correction retry — mirrors CLI's DOM+vision correction loop ──────
+            # If the step failed (attempt 1), gather DOM state and retry once with
+            # targeted correction hints injected into the system prompt.
+            # Skip retry if URL changed — navigation happened (even if verify was uncertain
+            # due to timing); retrying would navigate away from the correct page.
+            _url_changed_in_step = (
+                bool(url_after_step)
+                and bool(url_before_step)
+                and url_after_step != url_before_step
+            )
+            _attempts = 1
+            if _url_changed_in_step and not step_result.get("success", False):
+                # URL changed but verify said failed — likely a timing race where verify
+                # saw uncertain evidence. Treat as success to avoid navigating away.
+                await _emit(queue, "log", level="warn",
+                            message=(
+                                f"⚖️ URL changed {url_before_step.split('/')[-1]} → "
+                                f"{url_after_step.split('/')[-1]} — skipping retry to preserve navigation"
+                            ))
+                step_result["success"] = True
+                if not step_result.get("observation"):
+                    step_result["observation"] = f"URL navigated to {url_after_step}"
+            # When verify flipped ✅→❌ (model said success, verify said failed),
+            # treat as a likely false negative from UI chrome (e.g. SAP "Standard" label).
+            # Force success so the step doesn't trigger a retry that undoes the action.
+            if (
+                _verify_overrode_model
+                and not step_result.get("success", False)
+                and model_success   # model was the one saying success
+            ):
+                await _emit(queue, "log", level="warn",
+                            message=(
+                                f"⚖️ Verify false-negative suspected — model said success, "
+                                f"accepting model's assessment and skipping retry"
+                            ))
+                step_result["success"] = True
+
+            if (
+                not step_result.get("success", False)
+                and action_raw != "blocked"
+                and not _url_changed_in_step
+            ):
+                await _emit(queue, "log", level="warn",
+                            message=f"🔄 Step {step_counter} failed — gathering DOM context for retry…")
+                try:
+                    _dom_info = await _gather_dom_on_failure(
+                        bridge,
+                        step_desc,
+                        step_result.get("selector", ""),
+                    )
+                except Exception as _de:
+                    _dom_info = f"(DOM inspection error: {_de})"
+                    logger.warning(f"[EXPLORE {exploration_id}] DOM inspection failed: {_de}")
+
+                # Build correction hints from DOM + verify's diagnosis
+                _corr_hint  = step_result.get("correction_hint", "")
+                _fail_obs   = step_result.get("observation", "")
+                # Add nav-flyout hint for navigation steps — flyout closes between steps
+                _nav_hint = (
+                    "\n⚠️ NAV FLYOUT NOTE: The SAP navigation flyout may have closed. "
+                    "Take a browser_take_screenshot first. If the flyout is not open, "
+                    "click the Home button to reopen it before clicking Onboarding.\n"
+                    if any(kw in step_desc.lower() for kw in ("onboarding", "menu", "flyout", "navigation", "nav"))
+                    else ""
+                )
+                _correction = (
+                    f"WHAT FAILED: {_fail_obs[:300]}\n"
+                    + (f"DIAGNOSIS: {_corr_hint}\n" if _corr_hint else "")
+                    + _nav_hint
+                    + f"DOM STATE AT FAILURE:\n{_dom_info}"
+                )
+                await _emit(queue, "log", level="info",
+                            message=f"🔄 Retrying step {step_counter} with DOM correction context…")
+                logger.info(f"[EXPLORE {exploration_id}] Retry step {step_counter} — correction:\n{_correction[:300]}")
+
+                _attempts = 2
+                url_before_step = await bridge.get_current_url()
+                step_result = await _run_step_with_mcp(
+                    bridge, step_desc, step_type, history_ctx, memory_hints,
+                    ui_framework, _active_extra_rules(), exploration_id,
+                    step_counter, shots_dir, queue,
+                    correction_hints=_correction,
+                )
+
+                # Verify the retry result
+                action_raw2 = step_result.get("action", "")
+                if action_raw2 not in ("blocked", ""):
+                    url_after_retry = ""
+                    after_b64_retry = None
+                    try:
+                        _rshot = await bridge.call_tool("browser_take_screenshot", {})
+                        url_after_retry = await bridge.get_current_url()
+                        after_b64_retry = _rshot.get("screenshot_b64")
+                        if after_b64_retry and shots_dir:
+                            _rfname = f"step-{step_counter:03d}-retry-verify.png"
+                            (shots_dir / _rfname).write_bytes(
+                                __import__("base64").b64decode(after_b64_retry)
+                            )
+                            step_result.setdefault("screenshot_file", _rfname)
+                    except Exception:
+                        pass
+
+                    step_result = await _verify_step_mcp(
+                        step_desc, action_raw2,
+                        step_result.get("selector", ""),
+                        url_before_step, url_after_retry,
+                        after_b64_retry, step_result,
+                    )
+                    if step_result.get("success"):
+                        await _emit(queue, "log", level="info",
+                                    message=f"✅ Retry succeeded for step {step_counter}")
+                    else:
+                        await _emit(queue, "log", level="warn",
+                                    message=f"❌ Retry also failed for step {step_counter}")
+
+            success  = step_result.get("success", False)
+            action   = step_result.get("action", "")
+            selector = step_result.get("selector", "")
+            value    = step_result.get("value")
+            obs      = step_result.get("observation", "")
+            read_val = step_result.get("read_value")
+            shot_f   = step_result.get("screenshot_file", "")
+            pdec     = step_result.get("path_decision")
+
+            if pdec and path_taken is None:
+                path_taken = pdec
+                logger.info(f"[EXPLORE {exploration_id}] Path decision → {path_taken}")
+
+            log_entry = {
+                "step_num":          step_counter,
+                "description":       step_desc,
+                "action":            action,
+                "selector":          selector,
+                "value":             value,
+                "observation":       obs,
+                "notes":             "",
+                "confidence":        "high" if success else "low",
+                "path":              step_path,
+                "path_taken":        path_taken,
+                "screenshot_file":   shot_f,
+                "success":           success,
+                "error":             None if success else obs,
+                "memory_hints_used": len(memory_hints),
+                "read_value":        read_val,
+                "attempts":          _attempts,
+            }
+
+            if success:
+                last_failed_step  = ""
+                last_root_failure = ""
+                logger.info(f"[EXPLORE {exploration_id}] ✅ Step {step_counter}: {action} on '{selector[:50]}'")
+                if not any(s in current_domain for s in _sso_indicators):
+                    _record_selector_outcome(current_domain, step_desc, action, selector, value, success=True)
+            else:
+                last_failed_step  = step_desc
+                last_root_failure = step_desc   # root = first actual failure, propagated blocks don't override this
+                # Fetch URL at point of failure for richer diagnostics
+                _fail_url = ""
+                try:
+                    _fail_url = await bridge.get_current_url()
+                except Exception:
+                    pass
+                _fail_detail = obs[:120] if obs else "no observation"
+                _fail_msg = f"❌ Step {step_counter} failed — URL: {_fail_url} | {_fail_detail}"
+                logger.warning(f"[EXPLORE {exploration_id}] {_fail_msg}")
+                await _emit(queue, "log", level="warn", message=_fail_msg)
+                # Re-check for login wall after failure
+                try:
+                    _is_login = await bridge.call_tool("browser_evaluate", {
+                        "function": "() => !!document.querySelector('input[type=\"password\"]')"
+                    })
+                    if "true" in _is_login.get("text", "").lower():
+                        await _emit(queue, "log", level="error",
+                                    message=f"🔒 Login form detected at {_fail_url} — session has expired. Re-run auth.ts.")
+                except Exception:
+                    pass
+                if not any(s in current_domain for s in _sso_indicators):
+                    _record_selector_outcome(current_domain, step_desc, action, selector, value, success=False)
+
+            await _emit(queue, "step_result",
+                        step_num=step_counter, description=step_desc, success=success,
+                        action=action, selector=selector, value=value,
+                        observation=obs, attempts=_attempts, read_value=read_val,
+                        error=None if success else obs)
 
             steps_log.append(log_entry)
-            await page.wait_for_timeout(800)
 
         # ── E3: Generate MD and persist ────────────────────────────────────
+
         md_content = _generate_exploration_md(exploration_id, enriched_test_case, steps_log)
         (expl_dir / "exploration.md").write_text(md_content)
         (expl_dir / "steps.json").write_text(json.dumps({
@@ -2799,11 +4958,10 @@ Be strict: success=true only if there is clear visual evidence the step GOAL was
 
         logger.info(f"[EXPLORE {exploration_id}] ✅ Done — {step_counter} steps, MD saved")
 
-        await ctx.close()
-        await browser.close()
-        await pb.stop()
+        # [PLAYWRIGHT-CLI] await ctx.close(); await browser.close(); await pb.stop()
+        await bridge.stop()  # MCP: shut down the MCP server subprocess
 
-        return {
+        result = {
             "explorationId":   exploration_id,
             "stepsCompleted":  step_counter,
             "pathTaken":       path_taken,
@@ -2811,17 +4969,21 @@ Be strict: success=true only if there is clear visual evidence the step GOAL was
             "markdownContent": md_content,
             "status":          "complete",
         }
+        await _emit(queue, "complete", **result)
+        return result
 
     except Exception as e:
         logger.error(f"[EXPLORE {exploration_id}] Fatal: {e}")
-        for resource in [browser, pb]:
-            if resource:
-                try: await resource.close()
-                except: pass
+        # [PLAYWRIGHT-CLI] for resource in [browser, pb]: try: await resource.close()
+        if bridge:  # MCP: stop the server subprocess on error
+            try:
+                await bridge.stop()
+            except Exception:
+                pass
         md_content = _generate_exploration_md(exploration_id, enriched_test_case, steps_log) if steps_log else "# Exploration failed\n"
         try: (expl_dir / "exploration.md").write_text(md_content)
         except: pass
-        return {
+        result = {
             "explorationId":   exploration_id,
             "stepsCompleted":  len(steps_log),
             "pathTaken":       path_taken,
@@ -2830,6 +4992,205 @@ Be strict: success=true only if there is clear visual evidence the step GOAL was
             "status":          "error",
             "error":           str(e),
         }
+        await _emit(queue, "error", message=str(e), **result)
+        return result
+    finally:
+        # When _suppress_close=True the restart wrapper owns teardown.
+        if not _suppress_close:
+            if queue:
+                await queue.put(None)
+            _explore_queues.pop(exploration_id, None)
+            _explore_cancel.pop(exploration_id, None)
+
+
+@app.post("/api/enrich-steps")
+async def enrich_steps(req: EnrichStepsRequest):
+    """
+    Expand a high-level test description into explicit browser automation steps
+    using application-specific navigation knowledge.
+    """
+    # Build app-specific knowledge block
+    is_sf = any(kw in req.app_context.lower()
+                for kw in ("successfactors", "sap", "onboarding", "sf"))
+    sf_nav_knowledge = """
+SAP SUCCESSFACTORS ONBOARDING 2.0 — NAVIGATION KNOWLEDGE:
+
+Module navigation:
+  Home button → menuitem "Onboarding" → lands on Onboarding dashboard (/onb2Dashboard)
+
+From the Onboarding dashboard:
+  - "Manage Pending Recruits" is accessed via: Home → Onboarding → left-side nav item "Manage Pending Recruits"
+    OR via the Onboarding dashboard's navigation panel on the left.
+  - Candidate selection: ui5-combobox or input[placeholder="Search for new recruit"] or "Select pending recruit" dropdown.
+  - After selecting a candidate you land on their record page with sections:
+    Personal Information, Job Information, National ID, Email, Work Schedule, Contract End Date, etc.
+
+Common field locations in the candidate edit form:
+  - National ID: Personal Information section → National ID field (input with placeholder "National ID")
+  - Email Is Primary: Personal Information → Email section → Is Primary dropdown/toggle
+  - Work Schedule: Job Information section → Work Schedule dropdown (ui5-select)
+  - Contract End Date: Job Information or Contract section → date picker
+  - Submit: bottom of the form, "Submit" button
+
+Status reading from the Onboarding dashboard — EXACT SEQUENCE (do not skip the Go button):
+  Step 1: fill   input[placeholder="Search for new recruit"]  with candidate name
+  Step 2: click  the typeahead suggestion for the candidate
+  Step 3: click  the "Go" button (role=button[name="Go"]) — this applies the filter
+  Step 4: wait   for ui5-table-row to appear (table refreshes after Go)
+  Step 5: read   ui5-table-row >> ui5-table-cell:nth-child(4)  → Data Collection status
+  Step 6: read   ui5-table-row >> ui5-table-cell:nth-child(5)  → Compliance Forms status
+
+  NOTE: "Data Collection" and "Compliance Forms" are COLUMN HEADERS not row identifiers.
+  The table shows one row per candidate. After filtering with Go, the first row is the candidate.
+  Do NOT search for ui5-table-row:has-text("Data Collection") — that row does not exist.
+""" if is_sf else ""
+
+    system_prompt = f"""You are an expert browser automation engineer specialising in {req.app_context}.
+Your task is to expand a high-level test description into detailed, explicit step-by-step browser automation instructions.
+
+Rules:
+- Each step must describe exactly ONE discrete browser action (click, fill, select, read, navigate, wait).
+- Include the full navigation path before any field interaction — never assume the browser is already on the right page.
+- Name UI elements specifically (placeholder text, button label, menu item name, section heading).
+- For conditional paths (Path A / B), keep them clearly labelled.
+- Do NOT change the intent of the test — only add missing navigation and interaction detail.
+- Preserve the URL from the original description.
+- Output numbered steps only — no prose, no headers, no explanations.
+{sf_nav_knowledge}"""
+
+    user_prompt = f"""Expand this test description into detailed browser automation steps:
+
+{req.test_case}
+
+Return ONLY the numbered step list. No introduction, no summary."""
+
+    try:
+        enriched = ask_llm(system=system_prompt, user=user_prompt, max_tokens=2000)
+        return {"enriched": enriched.strip(), "app_context": req.app_context}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Enrichment failed: {e}")
+
+
+async def _run_exploration_with_restarts(
+    req: ExploreRequest,
+    outer_id: str,
+    queue: Optional[asyncio.Queue],
+) -> dict:
+    """Run _run_exploration up to max_restarts+1 times on cascade failure.
+
+    A "cascade failure" is when one real step failure blocks ≥2 downstream steps.
+    All attempts stream events to the same SSE queue so the client sees a continuous
+    feed. Each attempt stores its data under a distinct exploration directory:
+      attempt 1 → {outer_id}
+      attempt 2 → {outer_id}-r2
+      ...
+    The final attempt's explorationId is returned so the frontend knows which
+    directory to use for test-script generation.
+    """
+    max_attempts = req.max_restarts + 1
+    last_result: dict = {}
+
+    for attempt in range(1, max_attempts + 1):
+        is_last = (attempt == max_attempts)
+        inner_id = outer_id if attempt == 1 else f"{outer_id}-r{attempt}"
+
+        if attempt > 1:
+            await _emit(queue, "log", level="warn",
+                        message=f"🔁 Full restart — attempt {attempt}/{max_attempts} (new exploration: {inner_id})…")
+
+        # Register cancel for this inner attempt so the existing cancel check works.
+        _explore_cancel[inner_id] = _explore_cancel.get(outer_id, asyncio.Event())
+
+        last_result = await _run_exploration(
+            req, inner_id, queue=queue,
+            _suppress_close=not is_last,   # wrapper owns teardown for non-last attempts
+        )
+
+        if is_last:
+            break
+
+        # Decide whether to restart: a cascade is ≥2 blocked steps from 1 real failure
+        steps = last_result.get("steps", [])
+        real_failures = [
+            s for s in steps
+            if not s.get("success") and s.get("action") not in ("blocked", "", None)
+        ]
+        blocked = [s for s in steps if s.get("action") == "blocked"]
+
+        if not real_failures or len(blocked) < 2:
+            # Clean run or isolated failure — no restart benefit
+            is_last = True
+            if queue:
+                await queue.put(None)
+            _explore_queues.pop(outer_id, None)
+            _explore_cancel.pop(outer_id, None)
+            break
+
+        await _emit(queue, "log", level="warn",
+                    message=(
+                        f"🔁 Cascade detected: {len(real_failures)} failure(s) → "
+                        f"{len(blocked)} blocked steps. Restarting from step 1…"
+                    ))
+
+    return last_result
+
+
+@app.post("/api/explore")
+async def explore_test_case_sync(req: ExploreRequest):
+    """Synchronous explore — blocks until complete. Kept for backward compatibility."""
+    exploration_id = str(uuid.uuid4())[:8]
+    return await _run_exploration(req, exploration_id, queue=None)
+
+
+@app.post("/api/explore/start")
+async def explore_start(req: ExploreRequest):
+    """
+    Start an exploration as a background task. Returns immediately with explorationId.
+    Connect to GET /api/explorations/{id}/stream to receive live SSE events.
+    """
+    exploration_id = str(uuid.uuid4())[:8]
+    queue: asyncio.Queue = asyncio.Queue()
+    _explore_queues[exploration_id]  = queue
+    _explore_cancel[exploration_id]  = asyncio.Event()   # starts unset (not cancelled)
+    asyncio.create_task(_run_exploration_with_restarts(req, exploration_id, queue))
+    return {"explorationId": exploration_id, "streamUrl": f"/api/explorations/{exploration_id}/stream"}
+
+
+@app.get("/api/explorations/{exploration_id}/stream")
+async def stream_exploration(exploration_id: str):
+    """SSE stream for a running exploration. Emits events until 'complete' or 'error'."""
+    queue = _explore_queues.get(exploration_id)
+    if queue is None:
+        # Exploration already finished — serve the saved result as a single event
+        expl_dir = EXPLORATIONS_DIR / exploration_id
+        if (expl_dir / "steps.json").exists():
+            data = json.loads((expl_dir / "steps.json").read_text())
+            md   = (expl_dir / "exploration.md").read_text() if (expl_dir / "exploration.md").exists() else ""
+            payload = json.dumps({"type": "complete", "markdownContent": md, **data})
+            async def _done():
+                yield f"data: {payload}\n\n"
+            return StreamingResponse(_done(), media_type="text/event-stream")
+        raise HTTPException(status_code=404, detail="Exploration not found")
+
+    async def _generate():
+        try:
+            while True:
+                event = await asyncio.wait_for(queue.get(), timeout=120)
+                if event is None:
+                    yield "data: {\"type\":\"done\"}\n\n"
+                    break
+                yield f"data: {json.dumps(event, default=str)}\n\n"
+        except asyncio.TimeoutError:
+            yield "data: {\"type\":\"timeout\",\"message\":\"No activity for 120s\"}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 @app.post("/api/generate-from-exploration")
@@ -2917,6 +5278,18 @@ async def list_explorations():
             except Exception:
                 result.append({"id": d.name, "testCase": "Unknown", "stepsCount": 0})
     return result
+
+
+@app.post("/api/explorations/{exploration_id}/cancel")
+async def cancel_exploration(exploration_id: str):
+    """Signal a running exploration to stop at the next step boundary."""
+    flag = _explore_cancel.get(exploration_id)
+    if flag:
+        flag.set()
+        logger.info(f"[cancel] Cancellation signalled for {exploration_id}")
+        return {"cancelled": True, "explorationId": exploration_id}
+    return {"cancelled": False, "explorationId": exploration_id,
+            "message": "Exploration not running or already finished"}
 
 
 @app.get("/api/explorations/{exploration_id}")

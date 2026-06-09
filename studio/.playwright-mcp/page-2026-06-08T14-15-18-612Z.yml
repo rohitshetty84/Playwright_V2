@@ -1,0 +1,225 @@
+- generic [ref=e1]:
+  - generic:
+    - alert
+    - alert
+  - generic [ref=e6]:
+    - generic [ref=e234]:
+      - generic [ref=e236]:
+        - banner "Shell Bar" [ref=e238]:
+          - generic [ref=e239]:
+            - link "BHP Billiton Group Operations Pty Ltd(T2) logo image. Link to Home." [ref=e240] [cursor=pointer]:
+              - generic:
+                - generic:
+                  - img "BHP Billiton Group Operations Pty Ltd(T2) Logo"
+            - heading "Home" [level=1]
+            - button "Home" [ref=e241] [cursor=pointer]:
+              - generic [ref=e242]: Home
+              - img [ref=e244]
+          - generic [ref=e247]:
+            - generic [ref=e249]:
+              - generic [ref=e251]:
+                - textbox "Search for actions or people" [ref=e252]
+                - generic: Suggestions Available
+                - status
+                - generic: Auto-complete search results are shown after you enter at least 2 characters. When results are shown, use the UP and DOWN arrow keys to navigate the list of actions and people. When focus is on a person in search results, press the CTRL + SHIFT + 1 keys to move focus to the employee profile preview for that person. Press F6 to select the Directory Search.
+              - 'dialog "You can search for: Forward Action keywords, such as “address”, “goal”, or “badge”‎. Employee name" [ref=e521]':
+                - banner [ref=e522]:
+                  - generic [ref=e526]:
+                    - paragraph [ref=e527]: "You can search for:"
+                    - list [ref=e528]:
+                      - listitem [ref=e529]:
+                        - img "Forward" [ref=e531]
+                        - text: Action keywords, such as “address”, “goal”, or “badge”‎.
+                      - listitem [ref=e533]:
+                        - img [ref=e535]
+                        - text: Employee name
+            - button "Search" [ref=e254] [cursor=pointer]:
+              - img [ref=e256]
+            - button "You have 0 to-do items." [ref=e259] [cursor=pointer]:
+              - img [ref=e261]
+            - button "Built-In Support" [ref=e264] [cursor=pointer]:
+              - img [ref=e266]
+            - button "Show Me video opens in a new tab or window" [ref=e269] [cursor=pointer]:
+              - img [ref=e271]
+            - button "WalkMe" [ref=e274] [cursor=pointer]:
+              - img [ref=e276]
+            - button "0 Notifications" [ref=e279] [cursor=pointer]:
+              - img [ref=e281]
+            - button "Account Navigation for Automation User" [ref=e284] [cursor=pointer]:
+              - generic [ref=e286]:
+                - generic:
+                  - generic:
+                    - generic:
+                      - img "Account Navigation for Automation User":
+                        - generic: AU
+        - generic:
+          - generic:
+            - generic: "*"
+      - alert [ref=e287]
+    - main [ref=e8]:
+      - heading "Good evening!" [level=1] [ref=e290]
+      - generic [ref=e10]:
+        - generic [ref=e131]:
+          - heading "Quick Actions" [level=2] [ref=e132]
+          - region "Quick Actions" [ref=e133]:
+            - list [ref=e134]:
+              - listitem [ref=e135]:
+                - link "View My Profile" [ref=e138] [cursor=pointer]:
+                  - /url: /sf/liveprofile
+                  - img [ref=e140]
+                  - generic [ref=e142]: View My Profile
+              - listitem [ref=e143]:
+                - link "View Org Chart" [ref=e146] [cursor=pointer]:
+                  - /url: /sf/orgchart
+                  - img [ref=e148]
+                  - generic [ref=e150]: View Org Chart
+              - listitem [ref=e151]:
+                - button "View Favourite Reports" [ref=e154] [cursor=pointer]:
+                  - img [ref=e156]
+                  - generic [ref=e158]: View Favourite Reports
+              - listitem [ref=e159]:
+                - link "View Admin Alerts" [ref=e162] [cursor=pointer]:
+                  - /url: /sf/adminalerts
+                  - img [ref=e164]
+                  - generic [ref=e166]: View Admin Alerts
+              - listitem [ref=e167]:
+                - link "Manage My Goals" [ref=e170] [cursor=pointer]:
+                  - /url: /sf/goals
+                  - img [ref=e172]
+                  - generic [ref=e174]: Manage My Goals
+              - listitem [ref=e175]:
+                - button "Create Activity" [ref=e178] [cursor=pointer]:
+                  - img [ref=e180]
+                  - generic [ref=e182]: Create Activity
+              - listitem [ref=e183]:
+                - link "View My Learning" [ref=e186] [cursor=pointer]:
+                  - /url: /sf/learning?Treat-As=WEB
+                  - img [ref=e188]
+                  - generic [ref=e190]: View My Learning
+              - listitem [ref=e191]:
+                - link "View Report Centre" [ref=e194] [cursor=pointer]:
+                  - /url: /sf/reportcenter
+                  - img [ref=e196]
+                  - generic [ref=e198]: View Report Centre
+              - listitem [ref=e199]:
+                - link "Activate Mobile App" [ref=e202] [cursor=pointer]:
+                  - /url: /sf/options?opt_ns=mobile_reg
+                  - img [ref=e204]
+                  - generic [ref=e206]: Activate Mobile App
+              - listitem [ref=e207]:
+                - link "View Pending Workflows" [ref=e210] [cursor=pointer]:
+                  - /url: /sf/pendingworkflows
+                  - img [ref=e212]
+                  - generic [ref=e214]: View Pending Workflows
+              - listitem [ref=e215]:
+                - button "View Reminders" [ref=e218] [cursor=pointer]:
+                  - img [ref=e220]
+                  - generic [ref=e222]: View Reminders
+              - listitem [ref=e223]:
+                - button "View Favourites" [ref=e226] [cursor=pointer]:
+                  - img [ref=e228]
+                  - generic [ref=e230]: View Favourites
+        - generic [ref=e292]:
+          - heading "For You Today" [level=2] [ref=e293]
+          - region "For You Today" [ref=e294]:
+            - region "Take Action card" [ref=e299]:
+              - generic [ref=e303] [cursor=pointer]:
+                - generic [ref=e304]:
+                  - generic [ref=e306]:
+                    - generic [ref=e307]:
+                      - img [ref=e309]
+                      - generic "Take Action" [ref=e311]
+                    - heading "Please update your employee profile" [level=3] [ref=e312]:
+                      - button "Please update your employee profile" [ref=e313]:
+                        - generic [ref=e314]:
+                          - generic: Please update your employee profile
+                    - generic [ref=e315]: Due in 22 days
+                  - button "Mark as Complete Take Action" [ref=e319]:
+                    - generic [ref=e322]: Mark as Complete
+                - generic [ref=e323]:
+                  - button "More Actions Take Action" [ref=e326]:
+                    - img [ref=e328]
+                  - generic [ref=e330]: More Actions
+        - generic [ref=e332]:
+          - heading "Common Tasks" [level=2] [ref=e333]
+          - heading "Organisational Updates" [level=3] [ref=e334]
+          - region "Common Tasks Organisational Updates" [ref=e335]:
+            - region "Update your Employee Profile card" [ref=e339]:
+              - generic [ref=e343] [cursor=pointer]:
+                - generic "Please update your Formal Education, Work Experience Within Company, Previous Employment, Commodities Experience" [ref=e345]:
+                  - img "Please update your Formal Education, Work Experience Within Company, Previous Employment, Commodities Experience" [ref=e346]
+                - generic [ref=e349]:
+                  - heading "Update your Employee Profile" [level=4] [ref=e350]:
+                    - button "Update your Employee Profile" [ref=e351]:
+                      - generic [ref=e352]:
+                        - generic: Update your Employee Profile
+                  - generic [ref=e353]: Formal Education & Work Experience
+        - region "Common Tasks" [ref=e356]:
+          - generic [ref=e357]:
+            - generic [ref=e358]:
+              - region "My Payslip card" [ref=e360]:
+                - heading "My Payslip" [level=3] [ref=e371] [cursor=pointer]:
+                  - link "My Payslip" [ref=e372]:
+                    - /url: https://mobile.bhp.com/site/fiori#RemunerationStatement-display?save-appvar-id=customer.bhp.fiori.hr.mypaystubs
+                    - generic [ref=e373]:
+                      - generic: My Payslip
+              - region "My Leave Requests card" [ref=e375]:
+                - heading "My Leave Requests" [level=3] [ref=e386] [cursor=pointer]:
+                  - link "My Leave Requests" [ref=e387]:
+                    - /url: https://mobile.bhp.com/site/fiori#LeaveRequest-manage
+                    - generic [ref=e388]:
+                      - generic: My Leave Requests
+            - generic [ref=e389]:
+              - region "My TimeSheet card" [ref=e391]:
+                - heading "My TimeSheet" [level=3] [ref=e402] [cursor=pointer]:
+                  - link "My TimeSheet" [ref=e403]:
+                    - /url: https://mobile.bhp.com/site/fiori#TimeEntry-manageTimesheet?save-appvar-id=customer.bhp.fiori.hr.mytimesheet.id_1692787065679_1011
+                    - generic [ref=e404]:
+                      - generic: My TimeSheet
+              - region "Recruiting card" [ref=e406]:
+                - heading "Recruiting" [level=3] [ref=e417] [cursor=pointer]:
+                  - link "Recruiting" [ref=e418]:
+                    - /url: https://performancemanager8.successfactors.com/xi/ui/rcmjobreqsummary/pages/jobReqSummary.xhtml?bplte_company=C0000161430P&_s.crb=MqaSJb6faX3j72TNu1e2oH6oVBmQjs2hj7iQZU9ISPI%253d
+                    - generic [ref=e419]:
+                      - generic: Recruiting
+            - generic [ref=e420]:
+              - region "My Forms card" [ref=e422]:
+                - heading "My Forms" [level=3] [ref=e433] [cursor=pointer]:
+                  - link "My Forms" [ref=e434]:
+                    - /url: https://performancemanager8.successfactors.com/sf/pmreviews?bplte_company=C0000161430P&_s.crb=MqaSJb6faX3j72TNu1e2oH6oVBmQjs2hj7iQZU9ISPI%253d
+                    - generic [ref=e435]:
+                      - generic: My Forms
+              - region "Careers card" [ref=e437]:
+                - heading "Careers" [level=3] [ref=e448] [cursor=pointer]:
+                  - link "Careers" [ref=e449]:
+                    - /url: https://careers.bhp.com/?locale=en_GB
+                    - generic [ref=e450]:
+                      - generic: Careers
+            - generic [ref=e451]:
+              - region "Strato Workflow Card & Report card" [ref=e453]:
+                - heading "Strato Workflow Card & Report" [level=3] [ref=e464] [cursor=pointer]:
+                  - link "Strato Workflow Card & Report" [ref=e465]:
+                    - /url: https://mqa-bhp.bhp-maint.stratohcm.com/widget.jsp?wk=TODO
+                    - generic [ref=e466]:
+                      - generic: Strato Workflow Card & Report
+              - region "Raise an HR Case card" [ref=e468]:
+                - heading "Raise an HR Case" [level=3] [ref=e479] [cursor=pointer]:
+                  - link "Raise an HR Case" [ref=e480]:
+                    - /url: https://case.bhpbilliton.com/en-US/case/createcase-HR/
+                    - generic [ref=e481]:
+                      - generic: Raise an HR Case
+            - generic [ref=e482]:
+              - region "MyHR+ card" [ref=e484]:
+                - heading "MyHR+" [level=3] [ref=e495] [cursor=pointer]:
+                  - link "MyHR+" [ref=e496]:
+                    - /url: https://spo.bhpbilliton.com/sites/HumanResources
+                    - generic [ref=e497]:
+                      - generic: MyHR+
+              - region "Open Text Home page card" [ref=e499]:
+                - generic [ref=e505] [cursor=pointer]:
+                  - img [ref=e509]
+                  - heading "Open Text Home page" [level=3] [ref=e513]:
+                    - link "Open Text Home page" [ref=e514]:
+                      - /url: https://otcs.g110-test.opentext.cloud/cs/cs?func=othcm.NavigateToIntegrationHTML&type=workspace&workspacetypeID=2&enabledocgen=false&otdsauth=saml_BHPtest_idp
+                      - generic [ref=e515]:
+                        - generic: Open Text Home page

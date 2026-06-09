@@ -1,0 +1,413 @@
+- generic [ref=e1]:
+  - generic:
+    - status
+    - status
+  - generic [ref=e15]:
+    - generic [ref=e20]:
+      - banner [ref=e22]:
+        - generic "Shell Bar" [ref=e24]:
+          - generic [ref=e25]:
+            - link "BHP Billiton Group Operations Pty Ltd(T2) logo image. Link to Home." [ref=e119] [cursor=pointer]:
+              - generic:
+                - generic:
+                  - img "BHP Billiton Group Operations Pty Ltd(T2) Logo"
+            - heading "Onboarding" [level=1]
+            - button "Onboarding" [ref=e27] [cursor=pointer]:
+              - generic [ref=e28]: Onboarding
+              - img [ref=e30]
+          - generic [ref=e33]:
+            - generic [ref=e123]:
+              - textbox "Search for actions or people" [ref=e124]
+              - generic: Suggestions Available
+              - status
+              - generic: Auto-complete search results are shown after you enter at least 2 characters. When results are shown, use the UP and DOWN arrow keys to navigate the list of actions and people. When focus is on a person in search results, press the CTRL + SHIFT + 1 keys to move focus to the employee profile preview for that person. Press F6 to select the Directory Search.
+            - button "Search" [ref=e35] [cursor=pointer]:
+              - img [ref=e37]
+            - button "You have 0 to-do items." [ref=e40] [cursor=pointer]:
+              - img [ref=e42]
+            - button "Built-In Support" [ref=e45] [cursor=pointer]:
+              - img [ref=e47]
+            - button "WalkMe" [ref=e50] [cursor=pointer]:
+              - img [ref=e52]
+            - button "0 Notifications" [ref=e55] [cursor=pointer]:
+              - img [ref=e57]
+            - button "Account Navigation for Automation User" [ref=e125] [cursor=pointer]:
+              - generic [ref=e62]:
+                - generic:
+                  - generic:
+                    - generic:
+                      - img "Account Navigation for Automation User":
+                        - generic: AU
+        - generic:
+          - generic:
+            - generic: "*"
+      - alert [ref=e63]
+    - main [ref=e64]:
+      - button "Show Me video opens in a new tab or window" [ref=e66] [cursor=pointer]:
+        - generic [ref=e68]: 
+      - article [ref=e75]:
+        - generic [ref=e77]:
+          - button "Standard" [expanded] [active]
+          - generic [ref=e86]:
+            - heading "Standard" [level=2] [ref=e127]
+            - button "View Standard." [ref=e128] [cursor=pointer]:
+              - generic [ref=e90]: 
+        - generic [ref=e94]:
+          - region "Expanded header" [ref=e96]:
+            - generic [ref=e99]:
+              - generic [ref=e129]:
+                - generic [ref=e132]: "New Recruit:"
+                - textbox "New Recruit:" [ref=e135]:
+                  - /placeholder: Search for new recruit
+              - generic [ref=e136]:
+                - generic [ref=e139]: "Start Date (From):"
+                - generic [ref=e141]:
+                  - textbox "Start Date (From):" [ref=e142]:
+                    - /placeholder: Select Date (8 Jun 2026)
+                  - generic [ref=e144] [cursor=pointer]: 
+              - generic [ref=e146]:
+                - generic [ref=e149]: "Start Date (To):"
+                - generic [ref=e151]:
+                  - textbox "Start Date (To):" [ref=e152]:
+                    - /placeholder: Select Date (8 Jun 2026)
+                  - generic [ref=e154] [cursor=pointer]: 
+              - generic [ref=e156]:
+                - generic [ref=e159]: "Hiring Manager:"
+                - textbox "Hiring Manager:" [ref=e162]:
+                  - /placeholder: Search for recruiting manager
+              - generic [ref=e163]:
+                - generic [ref=e166]: "Hire Type:"
+                - generic [ref=e168]:
+                  - combobox "Hire Type:" [ref=e169]: All
+                  - button [ref=e171] [cursor=pointer]: 
+              - generic [ref=e172]:
+                - generic [ref=e175]: "Process Tasks:"
+                - generic [ref=e177]:
+                  - combobox "Process Tasks:" [ref=e178]: All Tasks
+                  - button [ref=e180] [cursor=pointer]: 
+              - generic [ref=e181]:
+                - generic [ref=e184]: "Task Status:"
+                - generic [ref=e186]:
+                  - combobox "Task Status:" [ref=e187]: All Statuses
+                  - button [ref=e189] [cursor=pointer]: 
+              - generic [ref=e190]:
+                - generic [ref=e193]: "Process Status:"
+                - generic [ref=e195]:
+                  - generic [ref=e197]: Open
+                  - 'switch "Process Status: Open" [checked] [ref=e199] [cursor=pointer]':
+                    - generic [ref=e203]: 
+              - generic [ref=e205]:
+                - button "Go" [ref=e206] [cursor=pointer]:
+                  - generic [ref=e208]: Go
+                - button "Adapt Filters" [ref=e209] [cursor=pointer]:
+                  - generic [ref=e211]: Adapt Filters
+            - button "Collapse Header" [ref=e107] [cursor=pointer]:
+              - generic [ref=e109]: 
+            - button "Pin Header" [ref=e110] [cursor=pointer]:
+              - generic [ref=e112]: 
+          - generic [ref=e213]:
+            - toolbar "New Recruits (9893)" [ref=e214]:
+              - heading "New Recruits (9893)" [level=2] [ref=e215]
+              - button "Get help with details about new recruits and their tasks." [ref=e216] [cursor=pointer]:
+                - generic [ref=e218]: 
+              - button "Mass Complete My New Hire Tasks" [disabled] [ref=e220]:
+                - generic [ref=e222]: Mass Complete My New Hire Tasks
+              - button "Sort" [ref=e223] [cursor=pointer]:
+                - generic [ref=e225]: 
+            - grid "New Recruits (9893)" [ref=e226]:
+              - rowgroup [ref=e227]:
+                - row "Selection New Recruit Hiring Manager Start Date Data Collection Compliance Forms New Recruit Tasks" [ref=e228]:
+                  - columnheader "Selection" [ref=e229]:
+                    - checkbox "Select All" [ref=e230]
+                  - columnheader "New Recruit" [ref=e232]:
+                    - generic [ref=e236]: New Recruit
+                  - columnheader "Hiring Manager" [ref=e237]:
+                    - generic [ref=e241]: Hiring Manager
+                  - columnheader "Start Date" [ref=e242]:
+                    - generic [ref=e246]: Start Date
+                  - columnheader "Data Collection" [ref=e247]:
+                    - generic [ref=e251]: Data Collection
+                  - columnheader "Compliance Forms" [ref=e252]:
+                    - generic [ref=e256]: Compliance Forms
+                  - columnheader "New Recruit Tasks" [ref=e257]:
+                    - generic [ref=e261]: New Recruit Tasks
+                  - columnheader [ref=e262]
+              - rowgroup [ref=e263]:
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 18 Feb 2019 Completed Object Status Not Available No Task Object Status Go to the task details for {0}" [ref=e264]':
+                  - gridcell "Item Selection" [ref=e265]:
+                    - checkbox "Item Selection" [ref=e266]
+                  - gridcell "business-card" [ref=e268]:
+                    - generic [ref=e269]:
+                      - button "business-card" [ref=e278] [cursor=pointer]:
+                        - generic [ref=e280]: 
+                      - generic [ref=e283]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e285]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e289] [cursor=pointer]':
+                      - generic [ref=e291]: 
+                  - gridcell "18 Feb 2019" [ref=e292]:
+                    - generic [ref=e295]: 18 Feb 2019
+                  - gridcell "Completed Object Status" [ref=e296]:
+                    - generic [ref=e301]:
+                      - generic [ref=e303]: Completed
+                      - generic: Object Status
+                  - gridcell "Not Available" [ref=e304]:
+                    - generic [ref=e308]: Not Available
+                  - gridcell "No Task Object Status" [ref=e309]:
+                    - generic [ref=e314]:
+                      - generic [ref=e316]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e317]':
+                    - 'button "Go to the task details for {0}" [ref=e318] [cursor=pointer]':
+                      - generic [ref=e320]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 2 Sept 2019 Completed Object Status Completed Object Status No Task Object Status Go to the task details for {0}" [ref=e321]':
+                  - gridcell "Item Selection" [ref=e322]:
+                    - checkbox "Item Selection" [ref=e323]
+                  - gridcell "business-card" [ref=e325]:
+                    - generic [ref=e326]:
+                      - button "business-card" [ref=e335] [cursor=pointer]:
+                        - generic [ref=e337]: 
+                      - generic [ref=e340]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e342]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e346] [cursor=pointer]':
+                      - generic [ref=e348]: 
+                  - gridcell "2 Sept 2019" [ref=e349]:
+                    - generic [ref=e352]: 2 Sept 2019
+                  - gridcell "Completed Object Status" [ref=e353]:
+                    - generic [ref=e358]:
+                      - generic [ref=e360]: Completed
+                      - generic: Object Status
+                  - gridcell "Completed Object Status" [ref=e361]:
+                    - generic [ref=e366]:
+                      - generic [ref=e368]: Completed
+                      - generic: Object Status
+                  - gridcell "No Task Object Status" [ref=e369]:
+                    - generic [ref=e374]:
+                      - generic [ref=e376]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e377]':
+                    - 'button "Go to the task details for {0}" [ref=e378] [cursor=pointer]':
+                      - generic [ref=e380]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 2 Sept 2019 Completed Object Status Overdue No Task Object Status Go to the task details for {0}" [ref=e381]':
+                  - gridcell "Item Selection" [ref=e382]:
+                    - checkbox "Item Selection" [ref=e383]
+                  - gridcell "business-card" [ref=e385]:
+                    - generic [ref=e386]:
+                      - button "business-card" [ref=e395] [cursor=pointer]:
+                        - generic [ref=e397]: 
+                      - generic [ref=e400]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e402]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e406] [cursor=pointer]':
+                      - generic [ref=e408]: 
+                  - gridcell "2 Sept 2019" [ref=e409]:
+                    - generic [ref=e412]: 2 Sept 2019
+                  - gridcell "Completed Object Status" [ref=e413]:
+                    - generic [ref=e418]:
+                      - generic [ref=e420]: Completed
+                      - generic: Object Status
+                  - gridcell "Overdue" [ref=e421]:
+                    - button "Overdue" [ref=e426] [cursor=pointer]:
+                      - generic [ref=e428]: Overdue
+                  - gridcell "No Task Object Status" [ref=e429]:
+                    - generic [ref=e434]:
+                      - generic [ref=e436]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e437]':
+                    - 'button "Go to the task details for {0}" [ref=e438] [cursor=pointer]':
+                      - generic [ref=e440]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 2 Jan 2021 Completed Object Status Not Available No Task Object Status Go to the task details for {0}" [ref=e441]':
+                  - gridcell "Item Selection" [ref=e442]:
+                    - checkbox "Item Selection" [ref=e443]
+                  - gridcell "business-card" [ref=e445]:
+                    - generic [ref=e446]:
+                      - button "business-card" [ref=e455] [cursor=pointer]:
+                        - generic [ref=e457]: 
+                      - generic [ref=e460]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e462]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e466] [cursor=pointer]':
+                      - generic [ref=e468]: 
+                  - gridcell "2 Jan 2021" [ref=e469]:
+                    - generic [ref=e472]: 2 Jan 2021
+                  - gridcell "Completed Object Status" [ref=e473]:
+                    - generic [ref=e478]:
+                      - generic [ref=e480]: Completed
+                      - generic: Object Status
+                  - gridcell "Not Available" [ref=e481]:
+                    - generic [ref=e485]: Not Available
+                  - gridcell "No Task Object Status" [ref=e486]:
+                    - generic [ref=e491]:
+                      - generic [ref=e493]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e494]':
+                    - 'button "Go to the task details for {0}" [ref=e495] [cursor=pointer]':
+                      - generic [ref=e497]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 1 Apr 2021 Completed Object Status Not Available No Task Object Status Go to the task details for {0}" [ref=e498]':
+                  - gridcell "Item Selection" [ref=e499]:
+                    - checkbox "Item Selection" [ref=e500]
+                  - gridcell "business-card" [ref=e502]:
+                    - generic [ref=e503]:
+                      - button "business-card" [ref=e512] [cursor=pointer]:
+                        - generic [ref=e514]: 
+                      - generic [ref=e517]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e519]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e523] [cursor=pointer]':
+                      - generic [ref=e525]: 
+                  - gridcell "1 Apr 2021" [ref=e526]:
+                    - generic [ref=e529]: 1 Apr 2021
+                  - gridcell "Completed Object Status" [ref=e530]:
+                    - generic [ref=e535]:
+                      - generic [ref=e537]: Completed
+                      - generic: Object Status
+                  - gridcell "Not Available" [ref=e538]:
+                    - generic [ref=e542]: Not Available
+                  - gridcell "No Task Object Status" [ref=e543]:
+                    - generic [ref=e548]:
+                      - generic [ref=e550]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e551]':
+                    - 'button "Go to the task details for {0}" [ref=e552] [cursor=pointer]':
+                      - generic [ref=e554]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 6 Sept 2023 Completed Object Status Completed Object Status No Task Object Status Go to the task details for {0}" [ref=e555]':
+                  - gridcell "Item Selection" [ref=e556]:
+                    - checkbox "Item Selection" [ref=e557]
+                  - gridcell "business-card" [ref=e559]:
+                    - generic [ref=e560]:
+                      - button "business-card" [ref=e569] [cursor=pointer]:
+                        - generic [ref=e571]: 
+                      - generic [ref=e574]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e576]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e580] [cursor=pointer]':
+                      - generic [ref=e582]: 
+                  - gridcell "6 Sept 2023" [ref=e583]:
+                    - generic [ref=e586]: 6 Sept 2023
+                  - gridcell "Completed Object Status" [ref=e587]:
+                    - generic [ref=e592]:
+                      - generic [ref=e594]: Completed
+                      - generic: Object Status
+                  - gridcell "Completed Object Status" [ref=e595]:
+                    - generic [ref=e600]:
+                      - generic [ref=e602]: Completed
+                      - generic: Object Status
+                  - gridcell "No Task Object Status" [ref=e603]:
+                    - generic [ref=e608]:
+                      - generic [ref=e610]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e611]':
+                    - 'button "Go to the task details for {0}" [ref=e612] [cursor=pointer]':
+                      - generic [ref=e614]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 7 Sept 2023 Completed Object Status Completed Object Status No Task Object Status Go to the task details for {0}" [ref=e615]':
+                  - gridcell "Item Selection" [ref=e616]:
+                    - checkbox "Item Selection" [ref=e617]
+                  - gridcell "business-card" [ref=e619]:
+                    - generic [ref=e620]:
+                      - button "business-card" [ref=e629] [cursor=pointer]:
+                        - generic [ref=e631]: 
+                      - generic [ref=e632]:
+                        - generic [ref=e634]: 
+                        - generic [ref=e637]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e639]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e643] [cursor=pointer]':
+                      - generic [ref=e645]: 
+                  - gridcell "7 Sept 2023" [ref=e646]:
+                    - generic [ref=e649]: 7 Sept 2023
+                  - gridcell "Completed Object Status" [ref=e650]:
+                    - generic [ref=e655]:
+                      - generic [ref=e657]: Completed
+                      - generic: Object Status
+                  - gridcell "Completed Object Status" [ref=e658]:
+                    - generic [ref=e663]:
+                      - generic [ref=e665]: Completed
+                      - generic: Object Status
+                  - gridcell "No Task Object Status" [ref=e666]:
+                    - generic [ref=e671]:
+                      - generic [ref=e673]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e674]':
+                    - 'button "Go to the task details for {0}" [ref=e675] [cursor=pointer]':
+                      - generic [ref=e677]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 7 Sept 2023 Completed Object Status Overdue No Task Object Status Go to the task details for {0}" [ref=e678]':
+                  - gridcell "Item Selection" [ref=e679]:
+                    - checkbox "Item Selection" [ref=e680]
+                  - gridcell "business-card" [ref=e682]:
+                    - generic [ref=e683]:
+                      - button "business-card" [ref=e692] [cursor=pointer]:
+                        - generic [ref=e694]: 
+                      - generic [ref=e697]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e699]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e703] [cursor=pointer]':
+                      - generic [ref=e705]: 
+                  - gridcell "7 Sept 2023" [ref=e706]:
+                    - generic [ref=e709]: 7 Sept 2023
+                  - gridcell "Completed Object Status" [ref=e710]:
+                    - generic [ref=e715]:
+                      - generic [ref=e717]: Completed
+                      - generic: Object Status
+                  - gridcell "Overdue" [ref=e718]:
+                    - button "Overdue" [ref=e723] [cursor=pointer]:
+                      - generic [ref=e725]: Overdue
+                  - gridcell "No Task Object Status" [ref=e726]:
+                    - generic [ref=e731]:
+                      - generic [ref=e733]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e734]':
+                    - 'button "Go to the task details for {0}" [ref=e735] [cursor=pointer]':
+                      - generic [ref=e737]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 7 Sept 2023 Completed Object Status Completed Object Status No Task Object Status Go to the task details for {0}" [ref=e738]':
+                  - gridcell "Item Selection" [ref=e739]:
+                    - checkbox "Item Selection" [ref=e740]
+                  - gridcell "business-card" [ref=e742]:
+                    - generic [ref=e743]:
+                      - button "business-card" [ref=e752] [cursor=pointer]:
+                        - generic [ref=e754]: 
+                      - generic [ref=e757]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e759]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e763] [cursor=pointer]':
+                      - generic [ref=e765]: 
+                  - gridcell "7 Sept 2023" [ref=e766]:
+                    - generic [ref=e769]: 7 Sept 2023
+                  - gridcell "Completed Object Status" [ref=e770]:
+                    - generic [ref=e775]:
+                      - generic [ref=e777]: Completed
+                      - generic: Object Status
+                  - gridcell "Completed Object Status" [ref=e778]:
+                    - generic [ref=e783]:
+                      - generic [ref=e785]: Completed
+                      - generic: Object Status
+                  - gridcell "No Task Object Status" [ref=e786]:
+                    - generic [ref=e791]:
+                      - generic [ref=e793]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e794]':
+                    - 'button "Go to the task details for {0}" [ref=e795] [cursor=pointer]':
+                      - generic [ref=e797]: 
+                - 'row "Item Selection business-card Contact details of hiring manager {0} 7 Sept 2023 Completed Object Status Completed Object Status No Task Object Status Go to the task details for {0}" [ref=e798]':
+                  - gridcell "Item Selection" [ref=e799]:
+                    - checkbox "Item Selection" [ref=e800]
+                  - gridcell "business-card" [ref=e802]:
+                    - generic [ref=e803]:
+                      - button "business-card" [ref=e812] [cursor=pointer]:
+                        - generic [ref=e814]: 
+                      - generic [ref=e817]: 
+                  - 'gridcell "Contact details of hiring manager {0}" [ref=e819]':
+                    - 'button "Contact details of hiring manager {0}" [ref=e823] [cursor=pointer]':
+                      - generic [ref=e825]: 
+                  - gridcell "7 Sept 2023" [ref=e826]:
+                    - generic [ref=e829]: 7 Sept 2023
+                  - gridcell "Completed Object Status" [ref=e830]:
+                    - generic [ref=e835]:
+                      - generic [ref=e837]: Completed
+                      - generic: Object Status
+                  - gridcell "Completed Object Status" [ref=e838]:
+                    - generic [ref=e843]:
+                      - generic [ref=e845]: Completed
+                      - generic: Object Status
+                  - gridcell "No Task Object Status" [ref=e846]:
+                    - generic [ref=e851]:
+                      - generic [ref=e853]: No Task
+                      - generic: Object Status
+                  - 'gridcell "Go to the task details for {0}" [ref=e854]':
+                    - 'button "Go to the task details for {0}" [ref=e855] [cursor=pointer]':
+                      - generic [ref=e857]: 
+  - button "Click here for help" [ref=e859] [cursor=pointer]:
+    - generic [ref=e860]:
+      - generic [ref=e861]: 
+      - generic [ref=e862]: Click here for help ⋮

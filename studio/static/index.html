@@ -448,8 +448,8 @@
   <div class="body">
     <!-- Sidebar nav -->
     <nav class="sidebar">
-      <div class="nav-item active" data-tab="synthesize">
-        <span class="icon">✦</span> Synthesize
+      <div class="nav-item active" data-tab="explore">
+        <span class="icon">🔍</span> Explore
       </div>
       <div class="nav-item" data-tab="golden">
         <span class="icon">📄</span> Golden Files
@@ -463,68 +463,10 @@
         <span class="icon">🔧</span> Auto-Heal
         <span class="nav-badge alert" id="nav-fail-count" style="display:none"></span>
       </div>
-      <div class="nav-item" data-tab="explore">
-        <span class="icon">🔍</span> Explore
-      </div>
     </nav>
 
     <!-- Main content -->
     <main class="main">
-
-      <!-- ═══════════════════════════ SYNTHESIZE ═══════════════════════════ -->
-      <div class="pane active" id="pane-synthesize">
-
-        <div class="card">
-          <div class="card-title">⚡ AI Test Synthesizer
-            <span style="font-size:11px;color:var(--text2);font-weight:400;margin-left:4px">Describe your test → AI writes the Playwright script → save as Golden</span>
-          </div>
-
-          <div id="synth-form" class="col">
-            <div>
-              <label>Test Case Description *</label>
-              <textarea id="synth-tc" rows="4" placeholder="e.g. SF Onboarding Path A — search candidate by name, update National ID, set email Is Primary = No, set Work Schedule + Contract End Date, submit form and verify redirect to /newhire"></textarea>
-            </div>
-            <div>
-              <label>Existing Script / Fragments (optional)</label>
-              <textarea id="synth-frag" rows="5" placeholder="Paste any existing Playwright helpers, selectors, or step comments…"></textarea>
-            </div>
-            <div id="synth-error" class="cand-error" style="display:none"></div>
-            <div class="row">
-              <button class="btn btn-primary" onclick="runSynthesize()">✦ Synthesize</button>
-              <button class="btn btn-ghost btn-sm" onclick="loadSample()">Load sample</button>
-            </div>
-          </div>
-
-          <!-- Progress -->
-          <div id="synth-progress" style="display:none" class="col mt-12">
-            <div class="progress-wrap"><div class="progress-bar" id="synth-prog-bar" style="width:0%"></div></div>
-            <div id="synth-prog-label" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent2)">Analysing…</div>
-          </div>
-        </div>
-
-        <!-- Analysis results -->
-        <div id="synth-analysis" class="card" style="display:none">
-          <div class="card-title">🔍 Analysis</div>
-          <div class="analysis-grid" id="analysis-grid"></div>
-        </div>
-
-        <!-- Generated code -->
-        <div id="synth-result" class="card" style="display:none">
-          <div class="card-title">Generated Script</div>
-          <div class="code-wrap">
-            <div class="code-header">
-              <span class="code-lang">typescript</span>
-              <button class="code-copy" onclick="copyCode('synth-code-pre')">copy</button>
-            </div>
-            <div class="code-body"><pre id="synth-code-pre"></pre></div>
-          </div>
-          <div class="row mt-12">
-            <input id="golden-name-input" placeholder="filename.spec.ts" style="flex:1" />
-            <button class="btn btn-success" onclick="saveGolden()">⬆ Save as Golden</button>
-            <button class="btn btn-ghost btn-sm" onclick="resetSynth()">✕</button>
-          </div>
-        </div>
-      </div>
 
       <!-- ═══════════════════════════ GOLDEN FILES ═══════════════════════════ -->
       <div class="pane" id="pane-golden">
@@ -557,6 +499,12 @@
 
       <!-- ═══════════════════════════ RUN HISTORY ═══════════════════════════ -->
       <div class="pane" id="pane-runs">
+        <div class="card" style="margin-bottom:8px;padding:10px 16px">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span style="font-size:12px;color:var(--text2)">Synced from GitHub Actions on open. Completed runs appear here automatically.</span>
+            <button class="btn btn-ghost btn-sm" onclick="syncAndFetchRuns().then(()=>showToast('Run history refreshed','success'))">↺ Refresh from GitHub</button>
+          </div>
+        </div>
         <div id="run-list"></div>
       </div>
 
@@ -615,7 +563,7 @@
       </div>
 
       <!-- ══════════════════════════ EXPLORE ══════════════════════════ -->
-      <div class="pane" id="pane-explore">
+      <div class="pane active" id="pane-explore">
 
         <div class="card">
           <div class="card-title">🔍 Browser Explorer
@@ -630,50 +578,107 @@
               <textarea id="explore-tc" rows="6"
                 placeholder="Describe every step including conditional paths (Path A / Path B). Include the full URL to start from.&#10;&#10;Example:&#10;1. Navigate to https://... and go to Onboarding Dashboard&#10;2. Search for candidate by name&#10;3. If Data Collection = Completed → Path A: ...&#10;   If not completed → Path B: ..."></textarea>
             </div>
-            <div style="display:flex;gap:12px">
+
+            <!-- App context + enrich -->
+            <div style="display:flex;gap:8px;align-items:flex-end">
               <div style="flex:1">
+                <label>Application / Knowledge Context
+                  <span style="font-size:10px;color:var(--text2);font-weight:400;margin-left:4px">— used to expand navigation steps before exploration</span>
+                </label>
+                <select id="explore-app-context-select" style="width:100%;margin-bottom:4px"
+                  onchange="onAppContextChange(this)">
+                  <option value="SAP SuccessFactors Onboarding 2.0" selected>SAP SuccessFactors Onboarding 2.0</option>
+                  <option value="SAP SuccessFactors Performance Management">SAP SuccessFactors Performance Management</option>
+                  <option value="SAP SuccessFactors Learning">SAP SuccessFactors Learning</option>
+                  <option value="SAP SuccessFactors Recruiting">SAP SuccessFactors Recruiting</option>
+                  <option value="Workday HCM">Workday HCM</option>
+                  <option value="ServiceNow">ServiceNow</option>
+                  <option value="Generic web application">Generic web application</option>
+                  <option value="custom">Custom — type below…</option>
+                </select>
+                <input id="explore-app-context" style="display:none;width:100%"
+                  placeholder="Describe your application (e.g. 'Salesforce CRM', 'our internal HR portal')" />
+              </div>
+              <div style="padding-bottom:2px">
+                <button class="btn btn-ghost btn-sm" id="enrich-btn" onclick="enrichSteps()"
+                  title="Expand your test description with explicit navigation steps using app knowledge">
+                  ✨ Enrich Steps
+                </button>
+              </div>
+            </div>
+
+            <!-- Enriched draft — shown for review before running -->
+            <div id="enrich-draft-card" style="display:none;border:1px solid var(--accent2);border-radius:8px;padding:14px;background:var(--warn-bg)">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <span style="font-size:12px;font-weight:600;color:var(--warn-t)">✨ Enriched draft — review and edit before running</span>
+                <div style="display:flex;gap:6px">
+                  <button class="btn btn-ghost btn-sm" onclick="applyEnrichedDraft()" style="color:var(--pass-t)">✓ Use this</button>
+                  <button class="btn btn-ghost btn-sm" onclick="document.getElementById('enrich-draft-card').style.display='none'">✕ Discard</button>
+                </div>
+              </div>
+              <textarea id="enrich-draft" rows="12"
+                style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12px;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);resize:vertical"></textarea>
+            </div>
+
+            <div style="display:flex;gap:12px;flex-wrap:wrap">
+              <div style="flex:1;min-width:180px">
                 <label>Auth Session (storageState name)</label>
                 <input id="explore-auth" placeholder="successfactors" value="successfactors"
                   title="Filename stem in studio/.auth/ — e.g. 'successfactors' → studio/.auth/successfactors.json" />
               </div>
-              <div style="width:120px">
+              <div style="width:110px">
                 <label>Max Steps</label>
                 <input id="explore-max-steps" type="number" value="25" min="5" max="50" />
+              </div>
+              <div style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:2px">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap">
+                  <input type="checkbox" id="explore-headless" checked style="width:14px;height:14px" />
+                  Run headless (background)
+                </label>
               </div>
             </div>
             <div id="explore-error" class="cand-error" style="display:none"></div>
             <div class="row">
-              <button class="btn btn-primary" onclick="runExplore()">🔍 Start Exploration</button>
+              <button class="btn btn-primary" id="explore-run-btn" onclick="runExplore()">🔍 Start Exploration</button>
             </div>
           </div>
 
           <!-- Exploration progress -->
           <div id="explore-progress" style="display:none" class="col mt-12">
             <div class="progress-wrap"><div class="progress-bar" id="explore-prog-bar" style="width:5%;background:linear-gradient(90deg,#7c3aed,#a78bfa)"></div></div>
-            <div id="explore-prog-label" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#a78bfa">Exploring…</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
+              <div id="explore-prog-label" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#a78bfa">Exploring…</div>
+              <button id="explore-stop-btn" class="btn btn-ghost btn-sm"
+                style="color:var(--fail-t);border-color:var(--fail-b);display:none"
+                onclick="stopExploration()">⏹ Stop</button>
+            </div>
           </div>
+        </div>
+
+        <!-- Live reasoning log — streams during exploration -->
+        <div id="explore-live-card" class="card" style="display:none">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <div class="card-title" style="margin:0">⚡ Live Reasoning Log</div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-ghost btn-sm" onclick="copyLog()" title="Copy log to clipboard">Copy</button>
+              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('explore-live-log').innerHTML=''">Clear</button>
+            </div>
+          </div>
+          <div id="explore-live-log"
+               style="height:280px;overflow-y:auto;
+                      background:#0d1117;border:1px solid #30363d;border-radius:8px;
+                      padding:12px;font-family:'JetBrains Mono',monospace;
+                      font-size:11.5px;line-height:1.8;color:#e6edf3"></div>
         </div>
 
         <!-- Step log — shown during / after exploration -->
-        <div id="explore-steps-card" class="card" style="display:none">
-          <div class="card-title">📋 Exploration Steps
-            <span id="explore-path-badge" style="display:none;margin-left:8px;font-size:11px;padding:2px 8px;border-radius:10px;background:#4f46e5;color:#fff"></span>
-          </div>
-          <div id="explore-step-list" style="font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.8"></div>
-        </div>
-
-        <!-- MD output — editable before generating test -->
-        <div id="explore-md-card" class="card" style="display:none">
-          <div class="card-title">📄 Exploration Document
-            <span style="font-size:11px;color:var(--text2);font-weight:400;margin-left:6px">Review and edit before generating the test script</span>
-          </div>
-          <textarea id="explore-md-editor" rows="20"
-            style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text1);resize:vertical"></textarea>
-          <div class="row mt-12">
-            <button class="btn btn-primary" onclick="generateFromExploration()">⚡ Generate Test Script</button>
-            <button class="btn btn-ghost btn-sm" onclick="copyCode('explore-md-editor')">Copy MD</button>
-          </div>
-        </div>
+        <!-- hidden: path badge kept for JS references -->
+        <span id="explore-path-badge" style="display:none"></span>
+        <!-- hidden: md editor kept so generateFromExploration() can read it -->
+        <textarea id="explore-md-editor" style="display:none"></textarea>
+        <!-- hidden: step list kept for JS references -->
+        <div id="explore-steps-card" style="display:none"><div id="explore-step-list"></div></div>
+        <div id="explore-md-card" style="display:none"></div>
 
         <!-- Generated test code -->
         <div id="explore-code-card" class="card" style="display:none">
@@ -725,7 +730,7 @@
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
-let STATE = { goldens: [], runs: [], synthCode: '', synthAnalysis: {}, healGoldenId: '', healCode: '',
+let STATE = { goldens: [], runs: [], healGoldenId: '', healCode: '',
               exploreId: '', exploreMd: '', exploreCode: '' };
 
 // ── Boot ───────────────────────────────────────────────────────────────────
@@ -753,6 +758,11 @@ async function fetchRuns() {
   STATE.runs = await api('GET', '/runs').catch(() => []);
   renderRuns();
 }
+async function syncAndFetchRuns() {
+  // Pull completed GitHub Actions runs into local store, then refresh list
+  await api('GET', '/runs/sync-from-github').catch(() => {});
+  await fetchRuns();
+}
 
 // ── Nav ────────────────────────────────────────────────────────────────────
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -762,6 +772,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.add('active');
     document.getElementById('pane-' + el.dataset.tab).classList.add('active');
     if (el.dataset.tab === 'heal') populateHealSelects();
+    if (el.dataset.tab === 'runs') syncAndFetchRuns();
   });
 });
 
@@ -776,203 +787,17 @@ function renderNav() {
 }
 
 // ── Synthesize ─────────────────────────────────────────────────────────────
-function loadSample() {
-  document.getElementById('synth-tc').value = 'SF Onboarding Path A — search candidate by name in Manage Pending Recruits, update National ID field, set Personal email Is Primary = No, set Work Schedule dropdown and Contract End Date, click Submit and verify redirect to /newhire URL';
-  document.getElementById('synth-frag').value = `// Reference: login helper
-async function login(page) {
-  await page.goto(SF_HOME, { waitUntil: 'networkidle' });
-  if (/Home - SAP SuccessFactors/i.test(await page.title())) return;
-  await page.goto(SF_SSO_URL, { waitUntil: 'networkidle' });
-}
-// Two Home buttons exist — scope to .first()
-await page.getByRole('button', { name: 'Home', exact: true }).first().click();`;
-}
-
-function resetSynth() {
-  ['synth-analysis','synth-result','synth-progress'].forEach(id => document.getElementById(id).style.display = 'none');
-  document.getElementById('synth-form').style.display = '';
-  document.getElementById('synth-error').style.display = 'none';
-  STATE.synthCode = ''; STATE.synthAnalysis = {};
-}
 
 function setProgress(barId, labelId, pct, label) {
   document.getElementById(barId).style.width = pct + '%';
   if (labelId) document.getElementById(labelId).textContent = label || '';
 }
 
-async function runSynthesize() {
-  const tc = document.getElementById('synth-tc').value.trim();
-  const frag = document.getElementById('synth-frag').value.trim();
-  if (!tc) { showError('synth-error', 'Please describe the test case first.'); return; }
-  showError('synth-error', '');
-
-  document.getElementById('synth-form').style.display = 'none';
-  document.getElementById('synth-progress').style.display = '';
-  setProgress('synth-prog-bar', 'synth-prog-label', 10, '🔍 Generating test with observer hooks…');
-
-  try {
-    // NEW: Call enhanced synthesis with validation
-    // This does: Generate → Run Local → Learn → Tune → Validate → Report
-    const result = await api('POST', '/synthesize/with-validation', { test_case: tc, script_fragment: frag });
-
-    // Phase 1 progress
-    setProgress('synth-prog-bar', 'synth-prog-label', 35, '📊 Phase 1: Running locally with observer…');
-
-    if (result.phase1Pass) {
-      setProgress('synth-prog-bar', 'synth-prog-label', 55, '✓ Phase 1 passed');
-    } else {
-      setProgress('synth-prog-bar', 'synth-prog-label', 55, '⚠️ Phase 1: ' + result.phase1Message);
-    }
-
-    // Phase 2 & 3 progress
-    if (result.phase2Updated) {
-      setProgress('synth-prog-bar', 'synth-prog-label', 75, '✓ Phase 2: Tuned selectors');
-      setProgress('synth-prog-bar', 'synth-prog-label', 90, '✓ Phase 3: Validated tuned test');
-    } else {
-      setProgress('synth-prog-bar', 'synth-prog-label', 90, '✓ Validation complete');
-    }
-
-    // Store code (use tuned code if available, otherwise generated)
-    STATE.synthCode = result.tunedCode || result.generatedCode;
-    STATE.synthAnalysis = { steps: [], risks: [], healingStrategies: [] };
-
-    // Show workflow results before asking about golden
-    const workflowEl = document.createElement('div');
-    workflowEl.className = 'card';
-    workflowEl.style.marginTop = '20px';
-    workflowEl.innerHTML = `
-      <div class="card-title">🎯 Synthesis Workflow Results</div>
-
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:16px">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-          <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Test Case Description</div>
-          <button onclick="
-            const tc = document.getElementById('synth-tc');
-            tc.value = this.dataset.tc;
-            document.getElementById('synth-form').style.display = '';
-            document.getElementById('synth-progress').style.display = 'none';
-            this.closest('.card').remove();
-            document.getElementById('synth-result').style.display = 'none';
-            tc.focus();
-          " data-tc="${esc(tc)}" style="font-size:11px;padding:3px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--accent);cursor:pointer;white-space:nowrap">✏️ Edit &amp; Re-run</button>
-        </div>
-        <div style="font-size:12px;color:var(--text);margin-top:6px;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow-y:auto">${esc(tc)}</div>
-      </div>
-
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
-        <div style="background:${result.phase1Pass ? 'var(--pass-bg)' : 'var(--warn-bg)'};border:1px solid ${result.phase1Pass ? 'var(--pass-b)' : 'var(--warn-b)'};border-radius:8px;padding:12px">
-          <div style="font-size:12px;font-weight:600;color:${result.phase1Pass ? 'var(--pass-t)' : 'var(--warn-t)'};margin-bottom:4px">
-            ${result.phase1Pass ? '✅' : '⚠️'} Phase 1: Local Run
-          </div>
-          <div style="font-size:11px;color:${result.phase1Pass ? 'var(--pass-t)' : 'var(--warn-t)'}">
-            ${result.phase1Message || 'Test executed'}
-          </div>
-        </div>
-        <div style="background:${result.phase2Updated ? 'var(--pass-bg)' : 'var(--bg)'};border:1px solid ${result.phase2Updated ? 'var(--pass-b)' : 'var(--border)'};border-radius:8px;padding:12px">
-          <div style="font-size:12px;font-weight:600;color:${result.phase2Updated ? 'var(--pass-t)' : 'var(--text2)'};margin-bottom:4px">
-            ${result.phase2Updated ? '✅' : '⏭️'} Phase 2: Auto-Tune
-          </div>
-          <div style="font-size:11px;color:var(--text2)">
-            ${result.phase2Updated
-              ? result.phase2Changes.length + ' selectors improved'
-              : (result.phase2SkipReason || 'No tuning needed')}
-          </div>
-          ${result.healRoundsUsed > 0 ? `<div style="font-size:10px;color:var(--text2);margin-top:4px">🔁 ${result.healRoundsUsed} heal round(s) attempted</div>` : ''}
-        </div>
-        <div style="background:${result.phase3Pass ? 'var(--pass-bg)' : 'var(--warn-bg)'};border:1px solid ${result.phase3Pass ? 'var(--pass-b)' : 'var(--warn-b)'};border-radius:8px;padding:12px">
-          <div style="font-size:12px;font-weight:600;color:${result.phase3Pass ? 'var(--pass-t)' : 'var(--warn-t)'};margin-bottom:4px">
-            ${result.phase3Pass ? '✅' : '⚠️'} Phase 3: Validate
-          </div>
-          <div style="font-size:11px;color:${result.phase3Pass ? 'var(--pass-t)' : 'var(--warn-t)'}">
-            ${result.phase3Message || 'Validation pending'}
-          </div>
-        </div>
-      </div>
-      <div style="background:${result.readyForGolden ? 'var(--pass-bg)' : 'var(--warn-bg)'};border:1px solid ${result.readyForGolden ? 'var(--pass-b)' : 'var(--warn-b)'};border-radius:8px;padding:14px;margin-bottom:16px">
-        <div style="font-size:13px;font-weight:600;color:${result.readyForGolden ? 'var(--pass-t)' : 'var(--warn-t)'};margin-bottom:4px">
-          ${result.readyForGolden ? '🎉 Ready for Golden' : '⚠️ Review Before Saving'}
-        </div>
-        <div style="font-size:12px;color:${result.readyForGolden ? 'var(--pass-t)' : 'var(--warn-t)'}">
-          ${result.recommendation}
-        </div>
-      </div>
-      ${result.phase2Changes.length > 0 ? `
-        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:16px">
-          <div style="font-size:12px;font-weight:600;color:var(--accent);margin-bottom:8px">Selector Improvements</div>
-          ${result.phase2Changes.map(c => `<div style="font-size:11px;color:var(--pass-t);margin-bottom:4px">✓ ${esc(c)}</div>`).join('')}
-        </div>
-      ` : ''}
-    `;
-
-    // Insert workflow results after progress
-    const synthResult = document.getElementById('synth-result');
-    synthResult.parentElement.insertBefore(workflowEl, synthResult);
-
-    // Update the generated code display
-    document.getElementById('synth-code-pre').innerHTML = highlight(STATE.synthCode);
-    const slug = tc.split(' ').slice(0,3).join('-').toLowerCase().replace(/[^a-z0-9-]/g,'');
-    document.getElementById('golden-name-input').value = slug + '.spec.ts';
-
-    // Update button state based on readiness
-    const saveBtn = document.querySelector('#synth-result .btn-success');
-    if (!result.readyForGolden) {
-      saveBtn.textContent = '⚠️ Review Issues First';
-      saveBtn.disabled = true;
-      saveBtn.style.opacity = '0.5';
-      saveBtn.style.cursor = 'not-allowed';
-    } else {
-      saveBtn.disabled = false;
-      saveBtn.style.opacity = '1';
-      saveBtn.style.cursor = 'pointer';
-    }
-
-    document.getElementById('synth-progress').style.display = 'none';
-    document.getElementById('synth-result').style.display = '';
-
-  } catch (e) {
-    showError('synth-error', e.message);
-    document.getElementById('synth-progress').style.display = 'none';
-    document.getElementById('synth-form').style.display = '';
-  }
-}
-
-function renderAnalysis(a) {
-  const grid = document.getElementById('analysis-grid');
-  grid.innerHTML = `
-    <div class="analysis-cell">
-      <div class="analysis-cell-title">Steps (${(a.steps||[]).length})</div>
-      ${(a.steps||[]).slice(0,6).map((s,i)=>`<div class="analysis-item"><span style="color:var(--accent);margin-right:6px">${i+1}.</span>${esc(s)}</div>`).join('')}
-    </div>
-    <div class="analysis-cell">
-      <div class="analysis-cell-title">Flakiness Risks</div>
-      ${(a.risks||[]).slice(0,5).map(r=>`<div class="analysis-item" style="color:var(--warn-t)">⚠ ${esc(r)}</div>`).join('')}
-    </div>
-    <div class="analysis-cell">
-      <div class="analysis-cell-title">Healing Applied</div>
-      ${(a.healingStrategies||[]).slice(0,5).map(h=>`<div class="analysis-item" style="color:var(--pass-t)">✓ ${esc(h)}</div>`).join('')}
-    </div>`;
-}
-
-async function saveGolden() {
-  const name = document.getElementById('golden-name-input').value.trim() || 'generated.spec.ts';
-  try {
-    const g = await api('POST', '/goldens', {
-      name, description: document.getElementById('synth-tc').value.slice(0,120),
-      code: STATE.synthCode, browsers: ['msedge'], analysis: STATE.synthAnalysis,
-    });
-    STATE.goldens.unshift(g);
-    renderGoldens(); renderNav();
-    toast('✓ Saved as Golden: ' + name);
-    resetSynth();
-    document.getElementById('synth-form').style.display = '';
-    switchTab('golden');
-  } catch(e) { toast('Error: ' + e.message); }
-}
 
 // ── Golden rendering ──────────────────────────────────────────────────────
 function renderGoldens() {
   const el = document.getElementById('golden-list');
-  if (!STATE.goldens.length) { el.innerHTML = '<div class="empty">No golden files yet — synthesize one first.</div>'; return; }
+  if (!STATE.goldens.length) { el.innerHTML = '<div class="empty">No golden files yet — run an exploration and save as Golden.</div>'; return; }
   el.innerHTML = STATE.goldens.map(g => `
     <div class="golden-card" style="margin-bottom:12px">
       <div class="golden-header" onclick="toggleBody(this)">
@@ -1014,21 +839,23 @@ function renderRuns() {
     const pass = candidates.filter(c=>c.status==='pass').length;
     const fail = candidates.filter(c=>c.status==='fail').length;
     const ov = fail > 0 ? 'fail' : 'pass';
+    const isGH = !!r.githubRunId;
+    const ghLink = r.githubRunUrl ? `<a href="${esc(r.githubRunUrl)}" target="_blank" style="font-size:10px;color:var(--accent);text-decoration:none;margin-left:8px">↗ GitHub #${r.githubRunNum||''}</a>` : '';
+    const name = r.goldenName && r.goldenName !== 'Unknown' ? r.goldenName : (isGH ? 'CI Run' : '—');
     return `
-    <div class="run-card" style="margin-bottom:12px">
+    <div class="run-card" style="margin-bottom:8px">
       <div class="run-header" onclick="toggleBody(this)">
-        <div class="row" style="flex:1;gap:12px">
+        <div class="row" style="flex:1;gap:12px;min-width:0">
           <span class="badge badge-${ov}">${ov.toUpperCase()}</span>
-          <div>
-            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#111827;font-weight:600">${esc(r.goldenName)}</span>
-            <span style="font-size:11px;color:var(--text2);margin-left:10px">🌐 ${r.browser}</span>
+          <div style="min-width:0">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#111827;font-weight:600">${esc(name)}</span>
+            ${ghLink}
           </div>
         </div>
-        <div class="row" style="gap:14px;flex-shrink:0">
-          <span style="font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace">🗓 ${r.runAt}</span>
-          <span style="font-size:11px;color:var(--pass-t);font-family:'JetBrains Mono',monospace">✓ ${pass}</span>
-          ${fail > 0 ? `<span style="font-size:11px;color:var(--fail-t);font-family:'JetBrains Mono',monospace">✗ ${fail}</span>` : ''}
-          <span style="color:var(--text2);font-size:12px">▼</span>
+        <div class="row" style="gap:10px;flex-shrink:0;font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace">
+          <span>${r.runAt}</span>
+          ${isGH ? '<span style="color:var(--text3)">GitHub Actions</span>' : `<span>🌐 ${r.browser}</span>`}
+          <span style="color:var(--text2)">▼</span>
         </div>
       </div>
       <div class="run-body">
@@ -1036,11 +863,10 @@ function renderRuns() {
           <div class="cand-row ${c.status}">
             <div class="row">
               <span class="badge badge-${c.status}">${c.status.toUpperCase()}</span>
-              <span style="font-family:'JetBrains Mono',monospace;font-size:13px">${esc(c.name)}</span>
-              <span class="badge badge-info" style="font-size:10px">Path ${c.path}</span>
-              <span style="margin-left:auto;font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace">⏱ ${c.duration||'—'}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:12px">${esc(c.name !== 'Unknown' ? c.name : name)}</span>
+              ${c.duration ? `<span style="margin-left:auto;font-size:11px;color:var(--text2)">⏱ ${c.duration}s</span>` : ''}
             </div>
-            ${c.error ? `<div class="cand-error">✗ ${esc(c.error)}</div>` : ''}
+            ${c.error && c.error !== `CI run #${r.githubRunNum} success` ? `<div class="cand-error">✗ ${esc(c.error)}</div>` : ''}
           </div>`).join('')}
       </div>
     </div>`;
@@ -1255,6 +1081,18 @@ function copyCodeFallback(text) {
   }
 }
 
+function copyLog() {
+  const el = document.getElementById('explore-live-log');
+  if (!el || !el.innerText.trim()) { toast('Log is empty'); return; }
+  // innerText preserves line breaks and strips HTML tags
+  const text = el.innerText;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('✓ Log copied!')).catch(() => copyCodeFallback(text));
+  } else {
+    copyCodeFallback(text);
+  }
+}
+
 function showError(id, msg) {
   const el = document.getElementById(id);
   el.textContent = msg;
@@ -1266,6 +1104,7 @@ function toast(msg) {
   t.textContent = msg; t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 2500);
 }
+function showToast(msg, _type) { toast(msg); }
 
 function switchTab(tab) {
   document.querySelectorAll('.nav-item').forEach(n => {
@@ -1328,6 +1167,9 @@ async function checkWorkflowStatus(goldenId) {
     }
 
     // Build status display
+    const fallbackNote = response.fallback
+      ? `<div style="color:var(--warn-t);font-size:10px;margin-top:4px">⚠ Most recent CI run (not golden-specific)</div>`
+      : '';
     statusEl.innerHTML = `
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;margin-top:8px;font-size:11px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -1335,17 +1177,19 @@ async function checkWorkflowStatus(goldenId) {
           <a href="${esc(response.github_link)}" target="_blank" style="color:var(--accent);text-decoration:none;font-size:10px">View in GitHub ↗</a>
         </div>
         <div style="color:var(--text2);font-family:'JetBrains Mono',monospace;font-size:10px;line-height:1.6">
-          <div>Run #${response.run_number}</div>
-          <div>Started: ${createdTime}</div>
-          <div>Updated: ${updatedTime}</div>
-          <div style="margin-top:6px;color:var(--text3)">${response.display_title}</div>
+          <div>Run #${response.run_number} · ${createdTime}</div>
+          <div style="color:var(--text3)">${response.display_title}</div>
+          ${fallbackNote}
         </div>
       </div>
     `;
 
-    // Auto-refresh if still running
+    // Auto-refresh if still running; import when completed
     if (response.conclusion === null) {
       setTimeout(() => checkWorkflowStatus(goldenId), 5000);
+    } else {
+      // Run completed — pull it into local run history
+      syncAndFetchRuns();
     }
   } catch (e) {
     statusEl.innerHTML = `<div style="color:var(--fail-t);font-size:11px;margin-top:8px">✗ ${esc(e.message)}</div>`;
@@ -1377,7 +1221,7 @@ async function syncGoldensToGitHub() {
   statusEl.style.display = 'none';
 
   try {
-    const res = await api('POST', '/api/goldens/sync');
+    const res = await api('POST', '/goldens/sync');
     const ok = res.synced;
     statusEl.style.cssText = `display:block;background:${ok ? 'var(--pass-bg)' : 'var(--bg)'};border:1px solid ${ok ? 'var(--pass-b)' : 'var(--border)'};color:${ok ? 'var(--pass-t)' : 'var(--text2)'};font-size:12px;padding:8px 12px;border-radius:6px;margin-bottom:10px`;
     statusEl.textContent = ok ? '✅ ' + res.message : 'ℹ️ ' + res.message;
@@ -1396,64 +1240,245 @@ boot();
 
 // ── Explore ────────────────────────────────────────────────────────────────
 
+function liveLog(msg, level='info') {
+  const el = document.getElementById('explore-live-log');
+  if (!el) return;
+  const colors = {
+    info:    '#8b949e',   // muted grey  — general log lines
+    success: '#3fb950',   // bright green — step passed
+    warn:    '#d29922',   // amber        — warnings
+    error:   '#f85149',   // red          — failures
+    memory:  '#bc8cff',   // purple       — memory hints
+    retry:   '#ffa657',   // orange       — retries
+  };
+  const line = document.createElement('div');
+  line.style.color = colors[level] || colors.info;
+  // Highlight keywords for scannability
+  const time = `<span style="color:#484f58">[${new Date().toLocaleTimeString()}]</span> `;
+  line.innerHTML = time + msg
+    .replace(/✅/g, '<span style="color:#3fb950">✅</span>')
+    .replace(/❌/g, '<span style="color:#f85149">❌</span>')
+    .replace(/🔄/g, '<span style="color:#ffa657">🔄</span>')
+    .replace(/🧠/g, '<span style="color:#bc8cff">🧠</span>')
+    .replace(/▶/g,  '<span style="color:#58a6ff">▶</span>')
+    .replace(/━+/g, '<span style="color:#30363d">$&</span>');
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function handleExploreEvent(event) {
+  const type = event.type;
+
+  if (type === 'step_start') {
+    liveLog(`▶ Step ${event.step_num}/${event.total_steps}: ${event.description}`, 'info');
+    setProgress('explore-prog-bar', null,
+      Math.min(90, 10 + Math.round((event.step_num / (event.total_steps || 1)) * 80)));
+    document.getElementById('explore-prog-label').textContent =
+      `Step ${event.step_num}/${event.total_steps}: ${event.description.slice(0,60)}`;
+
+  } else if (type === 'memory_hint') {
+    liveLog(`  🧠 Memory: ${event.count} hint(s) — trying "${event.top_selector}" (${event.confidence})`, 'memory');
+
+  } else if (type === 'log') {
+    liveLog(`  ${event.message}`, event.level || 'info');
+
+  } else if (type === 'retry') {
+    liveLog(`  🔄 Retry ${event.attempt}/${event.max_attempts-1}: ${event.reason}`, 'retry');
+
+  } else if (type === 'step_result') {
+    if (event.success) {
+      const sel = event.selector ? ` → "${event.selector}"` : '';
+      const tries = event.attempts > 1 ? ` (${event.attempts} attempts)` : '';
+      liveLog(`  ✅ ${event.action}${sel}${tries}`, 'success');
+      if (event.observation) liveLog(`     ${event.observation}`, 'info');
+      if (event.read_value)  liveLog(`     Read: "${event.read_value}"`, 'success');
+      // Add to live step list
+      appendLiveStep(event);
+    } else {
+      liveLog(`  ❌ Failed: ${event.error || 'verification failed'}`, 'error');
+      appendLiveStep(event);
+    }
+
+  } else if (type === 'complete' || type === 'done') {
+    if (type === 'complete') {
+      STATE.exploreId = event.explorationId;
+      STATE.exploreMd = event.markdownContent || '';
+      setProgress('explore-prog-bar', null, 100);
+      document.getElementById('explore-prog-label').textContent =
+        `✅ Exploration complete — ${event.stepsCompleted} steps`;
+      if (event.pathTaken) {
+        const badge = document.getElementById('explore-path-badge');
+        badge.textContent = `Path ${event.pathTaken} taken`;
+        badge.style.display = 'inline-block';
+      }
+      document.getElementById('explore-md-editor').value = STATE.exploreMd;
+      document.getElementById('explore-md-card').style.display = 'block';
+      document.getElementById('explore-steps-card').style.display = 'block';
+      // Restore the form so the user can edit and re-run without resetting
+      document.getElementById('explore-form').style.display = 'block';
+      document.getElementById('explore-progress').style.display = 'none';
+      const _rb = document.getElementById('explore-run-btn');
+      if (_rb) { _rb.disabled = false; _rb.textContent = '🔍 Re-run / Edit & Run'; }
+      document.getElementById('explore-stop-btn').style.display = 'none';
+      liveLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+      liveLog(`Exploration complete — ${event.stepsCompleted} steps. Generating test script…`, 'success');
+      showToast('Exploration complete — generating test script…', 'success');
+      loadExplorations();
+      // Auto-generate the TypeScript test script immediately
+      generateFromExploration();
+    }
+
+  } else if (type === 'error') {
+    liveLog(`💥 Fatal error: ${event.message}`, 'error');
+    showToast(`Exploration error: ${event.message}`, 'error');
+    setProgress('explore-prog-bar', null, 100);
+    document.getElementById('explore-prog-label').textContent = '❌ Exploration failed';
+    document.getElementById('explore-form').style.display = 'block';
+    document.getElementById('explore-progress').style.display = 'none';
+    document.getElementById('explore-stop-btn').style.display = 'none';
+    const _rb2 = document.getElementById('explore-run-btn');
+    if (_rb2) { _rb2.disabled = false; _rb2.textContent = '🔍 Start Exploration'; }
+  }
+}
+
+function appendLiveStep(event) {
+  const el = document.getElementById('explore-step-list');
+  const icon = event.success ? '✅' : '❌';
+  const tries = (event.attempts||1) > 1
+    ? ` <span style="color:#f59e0b">(${event.attempts} attempts)</span>` : '';
+  const sel = event.selector
+    ? `<div style="margin-left:20px"><code style="color:var(--accent2)">${escHtml(event.selector)}</code></div>` : '';
+  const obs = event.observation
+    ? `<div style="color:var(--text3);margin-left:20px">${escHtml(event.observation)}</div>` : '';
+  const err = event.error
+    ? `<div style="color:#f87171;margin-left:20px">⚠ ${escHtml(event.error)}</div>` : '';
+  const div = document.createElement('div');
+  div.style.marginBottom = '6px';
+  div.innerHTML = `${icon} <strong>Step ${event.step_num}</strong>: ${escHtml(event.description)}${tries}${sel}${obs}${err}`;
+  el.appendChild(div);
+}
+
+async function stopExploration() {
+  const btn = document.getElementById('explore-stop-btn');
+  if (!STATE.exploreId) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Stopping…';
+  try {
+    await api('POST', `/explorations/${STATE.exploreId}/cancel`);
+    showToast('Stop signal sent — exploration will halt after the current step', 'warn');
+  } catch (e) {
+    showToast(`Stop failed: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = '⏹ Stop';
+  }
+}
+
+async function enrichSteps() {
+  const tc = document.getElementById('explore-tc').value.trim();
+  if (!tc) { showToast('Enter a test description first', 'warn'); return; }
+
+  const appCtx = document.getElementById('explore-app-context').value.trim()
+               || 'SAP SuccessFactors Onboarding 2.0';
+  const btn = document.getElementById('enrich-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Enriching…';
+
+  try {
+    const res = await api('POST', '/enrich-steps', { test_case: tc, app_context: appCtx });
+    document.getElementById('enrich-draft').value = res.enriched;
+    document.getElementById('enrich-draft-card').style.display = 'block';
+    document.getElementById('enrich-draft').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    showToast('Draft ready — review and click "Use this" to apply', 'success');
+  } catch (e) {
+    showToast(`Enrichment failed: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '✨ Enrich Steps';
+  }
+}
+
+function applyEnrichedDraft() {
+  const draft = document.getElementById('enrich-draft').value.trim();
+  if (!draft) return;
+  document.getElementById('explore-tc').value = draft;
+  document.getElementById('enrich-draft-card').style.display = 'none';
+  showToast('Enriched description applied — ready to run', 'success');
+}
+
 async function runExplore() {
-  const tc      = document.getElementById('explore-tc').value.trim();
-  const auth    = document.getElementById('explore-auth').value.trim() || null;
+  const tc       = document.getElementById('explore-tc').value.trim();
+  const auth     = document.getElementById('explore-auth').value.trim() || null;
   const maxSteps = parseInt(document.getElementById('explore-max-steps').value) || 25;
-  const errEl   = document.getElementById('explore-error');
+  const headless = document.getElementById('explore-headless').checked;
+  const errEl    = document.getElementById('explore-error');
 
   errEl.style.display = 'none';
   if (!tc) { errEl.textContent = 'Test description is required.'; errEl.style.display = 'block'; return; }
 
-  // Reset cards
-  ['explore-steps-card','explore-md-card','explore-code-card'].forEach(id =>
+  // Reset UI
+  ['explore-steps-card','explore-md-card','explore-code-card','explore-live-card'].forEach(id =>
     document.getElementById(id).style.display = 'none');
   document.getElementById('explore-step-list').innerHTML = '';
+  document.getElementById('explore-live-log').innerHTML = '';
+  document.getElementById('explore-path-badge').style.display = 'none';
 
-  // Show progress
-  document.getElementById('explore-form').style.display = 'none';
-  const prog = document.getElementById('explore-progress');
-  prog.style.display = 'block';
-  setProgress('explore-prog-bar', null, 10);
-  document.getElementById('explore-prog-label').textContent = 'Parsing test steps…';
+  document.getElementById('explore-progress').style.display = 'block';
+  document.getElementById('explore-live-card').style.display = 'block';
+  const runBtn = document.getElementById('explore-run-btn');
+  runBtn.disabled = true;
+  runBtn.textContent = '⏳ Exploring…';
+  const stopBtn = document.getElementById('explore-stop-btn');
+  stopBtn.style.display = 'inline-flex';
+  stopBtn.disabled = false;
+  stopBtn.textContent = '⏹ Stop';
+  setProgress('explore-prog-bar', null, 5);
+  document.getElementById('explore-prog-label').textContent = 'Starting exploration…';
+  liveLog(`Starting exploration (headless=${headless}, max_steps=${maxSteps})…`);
 
   try {
-    setProgress('explore-prog-bar', null, 20);
-    document.getElementById('explore-prog-label').textContent = 'Launching browser and exploring…';
+    // Start exploration as background task
+    const start = await api('POST', '/explore/start', {
+      test_case: tc, storage_state: auth, max_steps: maxSteps, headless
+    });
+    STATE.exploreId = start.explorationId;
+    liveLog(`Exploration ID: ${start.explorationId}`);
+    setProgress('explore-prog-bar', null, 10);
 
-    const res = await api('POST', '/explore', { test_case: tc, storage_state: auth, max_steps: maxSteps });
+    // Connect SSE stream
+    const resp = await fetch(`/api/explorations/${start.explorationId}/stream`);
+    if (!resp.ok) throw new Error(`Stream connect failed: ${resp.status}`);
 
-    STATE.exploreId = res.explorationId;
-    STATE.exploreMd = res.markdownContent || '';
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let   buf     = '';
 
-    setProgress('explore-prog-bar', null, 90);
-    document.getElementById('explore-prog-label').textContent = `✅ Exploration complete — ${res.stepsCompleted} steps`;
-
-    // Render step log
-    renderExploreSteps(res.steps || []);
-    document.getElementById('explore-steps-card').style.display = 'block';
-
-    // Path badge
-    if (res.pathTaken) {
-      const badge = document.getElementById('explore-path-badge');
-      badge.textContent = `Path ${res.pathTaken} taken`;
-      badge.style.display = 'inline-block';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop(); // keep incomplete last line
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event = JSON.parse(line.slice(6));
+            handleExploreEvent(event);
+            if (event.type === 'done' || event.type === 'complete' || event.type === 'error') {
+              reader.cancel();
+              return;
+            }
+          } catch { /* partial JSON — ignore */ }
+        }
+      }
     }
-
-    // Populate MD editor
-    document.getElementById('explore-md-editor').value = STATE.exploreMd;
-    document.getElementById('explore-md-card').style.display = 'block';
-
-    setProgress('explore-prog-bar', null, 100);
-    if (res.status === 'error') showToast(`Exploration finished with error: ${res.error}`, 'warn');
-    else showToast('Exploration complete — review the MD and generate your test', 'success');
-
-    loadExplorations();
   } catch (e) {
     errEl.textContent = `Exploration failed: ${e.message}`;
     errEl.style.display = 'block';
     document.getElementById('explore-form').style.display = 'block';
-    prog.style.display = 'none';
+    document.getElementById('explore-progress').style.display = 'none';
+    const _rb3 = document.getElementById('explore-run-btn');
+    if (_rb3) { _rb3.disabled = false; _rb3.textContent = '🔍 Start Exploration'; }
+    liveLog(`Error: ${e.message}`, 'error');
     showToast('Exploration failed', 'error');
   }
 }
@@ -1516,15 +1541,18 @@ async function saveExploreGolden() {
 
   const tc = document.getElementById('explore-tc').value.trim();
   try {
-    await api('POST', '/api/goldens', {
+    const g = await api('POST', '/goldens', {
       name:     name.endsWith('.spec.ts') ? name : name + '.spec.ts',
       description: `Exploration-driven: ${tc.slice(0,120)}`,
       code:     STATE.exploreCode,
       browsers: ['chromium'],
       analysis: { source: 'explore', explorationId: STATE.exploreId },
     });
+    STATE.goldens.unshift(g);
+    renderGoldens();
+    renderNav();
     showToast('Saved as Golden ✓', 'success');
-    loadGoldens();
+    switchTab('golden');
   } catch (e) {
     showToast(`Save failed: ${e.message}`, 'error');
   }
