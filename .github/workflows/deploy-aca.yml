@@ -82,19 +82,46 @@ jobs:
           echo "**Image**: \`${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
 
       # ── 6. Post-deploy smoke test ────────────────────────────────────────────
-      # Waits up to 60 s for the container to wake from scale-zero, then runs
-      # a minimal public-site exploration to confirm browser + LLM are working.
+      # Waits for the NEW revision to reach Running state (not just the server
+      # to respond — the old revision might still be answering requests during
+      # the rolling update), then runs a minimal exploration smoke test.
       - name: Smoke test
         run: |
           pip install httpx --quiet
-          # Give the container up to 60 s to cold-start after deploy
-          echo "Waiting for container to warm up…"
-          for i in $(seq 1 12); do
+
+          # Step A: wait for the latest revision to be Running (up to 3 min)
+          echo "Waiting for new revision to become active…"
+          for i in $(seq 1 18); do
+            LATEST_REV=$(az containerapp revision list \
+              --name ${{ secrets.ACA_APP_NAME }} \
+              --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+              --query "[0].name" -o tsv 2>/dev/null)
+            REV_STATE=$(az containerapp revision show \
+              --name ${{ secrets.ACA_APP_NAME }} \
+              --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+              --revision "$LATEST_REV" \
+              --query "properties.runningState" -o tsv 2>/dev/null)
+            echo "  attempt $i: revision=$LATEST_REV state=$REV_STATE"
+            if [ "$REV_STATE" = "Running" ]; then
+              echo "New revision is Running."
+              break
+            fi
+            sleep 10
+          done
+
+          # Step B: wait for the server to respond on the new revision (up to 2 min)
+          echo "Waiting for server to respond…"
+          for i in $(seq 1 24); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.app_url.outputs.url }}/")
             if [ "$STATUS" = "200" ]; then echo "Server ready (attempt $i)"; break; fi
             echo "  attempt $i: HTTP $STATUS — retrying in 5s"
             sleep 5
           done
+
+          # Step C: extra buffer — let the new container fully stabilise
+          echo "Letting container stabilise (30s)…"
+          sleep 30
+
           python scripts/smoke_deploy.py \
             --url "${{ steps.app_url.outputs.url }}" \
             --ci

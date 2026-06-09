@@ -80,6 +80,19 @@ class PlaywrightMCPBridge:
         No-auth mode:
             @playwright/mcp launches and owns the browser directly.
         """
+        # Remove stale @playwright/mcp browser-profile lock dirs before launch.
+        # When a container is killed mid-exploration these dirs persist and the
+        # next run fails with "Browser is already in use". We also pass
+        # --isolated, but proactive cleanup is belt-and-suspenders.
+        _mcp_locks = Path("/ms-playwright")
+        if _mcp_locks.exists():
+            import glob, shutil as _shutil
+            for _ld in glob.glob(str(_mcp_locks / "mcp-*")):
+                try:
+                    _shutil.rmtree(_ld, ignore_errors=True)
+                except Exception:
+                    pass
+
         if self._storage_state and Path(self._storage_state).exists():
             cmd = await self._start_with_auth()
         else:
@@ -155,7 +168,6 @@ class PlaywrightMCPBridge:
         )
         return ["npx", "--yes", "@playwright/mcp",
                 "--cdp-endpoint", cdp_url,
-                "--isolated",           # fresh profile per session — no stale lock files
                 "--caps", "vision"]
 
     def _start_without_auth(self) -> list:
