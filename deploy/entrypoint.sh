@@ -66,6 +66,17 @@ else
     done
 fi
 
+# ── Clear stale @playwright/mcp browser locks ─────────────────────────────────
+# If the container was killed mid-exploration, @playwright/mcp leaves a lock
+# directory at /ms-playwright/mcp-*/. On next start those dirs cause:
+#   "Browser is already in use ... use --isolated to run multiple instances"
+# We already pass --isolated in mcp_bridge.py, but belt-and-suspenders: wipe
+# any leftover lock dirs at startup so they can't interfere.
+if [ -d "/ms-playwright" ]; then
+    find /ms-playwright -maxdepth 1 -type d -name "mcp-*" -exec rm -rf {} + 2>/dev/null || true
+    echo "[entrypoint] Cleared stale @playwright/mcp lock dirs"
+fi
+
 PORT="${PORT:-8000}"
 echo "[entrypoint] Starting server on port $PORT…"
 exec python3 -m uvicorn server:app --host 0.0.0.0 --port "$PORT"

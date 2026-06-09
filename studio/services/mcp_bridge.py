@@ -155,7 +155,8 @@ class PlaywrightMCPBridge:
         )
         return ["npx", "--yes", "@playwright/mcp",
                 "--cdp-endpoint", cdp_url,
-                "--caps", "vision"]   # enable browser_screenshot for visual reasoning
+                "--isolated",           # fresh profile per session — no stale lock files
+                "--caps", "vision"]
 
     def _start_without_auth(self) -> list:
         """@playwright/mcp owns the browser (no session needed)."""
@@ -164,6 +165,7 @@ class PlaywrightMCPBridge:
         # the channel selection happens at the Python-Playwright level in _start_with_auth.
         browser_arg = "chromium" if self._browser in ("chrome", "msedge") else self._browser
         cmd = ["npx", "--yes", "@playwright/mcp", "--browser", browser_arg,
+               "--isolated",           # fresh profile per session — no stale lock files
                "--caps", "vision"]
         if self._headless:
             cmd.append("--headless")
