@@ -45,7 +45,7 @@ class PlaywrightMCPBridge:
         self,
         storage_state: Optional[str] = None,
         headless: bool = True,
-        browser: str = "chrome",
+        browser: str = "chromium",
     ) -> None:
         self._storage_state = storage_state
         self._headless      = headless
@@ -126,10 +126,18 @@ class PlaywrightMCPBridge:
             "headless": self._headless,
             "args":     [f"--remote-debugging-port={cdp_port}"],
         }
-        if self._browser == "chrome":
-            self._auth_browser = await self._pw_instance.chromium.launch(
-                channel="chrome", **launch_opts
-            )
+        # "chrome" channel requires Google Chrome installed; fall back to
+        # the open-source Chromium build that Playwright always ships.
+        if self._browser in ("chrome", "msedge"):
+            try:
+                self._auth_browser = await self._pw_instance.chromium.launch(
+                    channel=self._browser, **launch_opts
+                )
+            except Exception:
+                logger.warning(
+                    f"[MCP] {self._browser} channel not found — falling back to Chromium"
+                )
+                self._auth_browser = await self._pw_instance.chromium.launch(**launch_opts)
         else:
             self._auth_browser = await self._pw_instance.chromium.launch(**launch_opts)
 
@@ -151,8 +159,12 @@ class PlaywrightMCPBridge:
 
     def _start_without_auth(self) -> list:
         """@playwright/mcp owns the browser (no session needed)."""
-        cmd = ["npx", "--yes", "@playwright/mcp", "--browser", self._browser,
-               "--caps", "vision"]   # enable browser_screenshot for visual reasoning
+        # @playwright/mcp only accepts "chromium", "firefox", "webkit" as --browser values.
+        # Branded channels (chrome, msedge) must be expressed as "chromium" here;
+        # the channel selection happens at the Python-Playwright level in _start_with_auth.
+        browser_arg = "chromium" if self._browser in ("chrome", "msedge") else self._browser
+        cmd = ["npx", "--yes", "@playwright/mcp", "--browser", browser_arg,
+               "--caps", "vision"]
         if self._headless:
             cmd.append("--headless")
         return cmd
