@@ -1,0 +1,33 @@
+{
+  "### Result\n\"www.amazon.sg": {
+    "patterns": [
+      {
+        "id": "8dff88c3",
+        "trigger": "Clicking product links in search results",
+        "pattern": "Use a generic element reference (e.g., 'e225') or fallback to dynamic selectors for product links, as standard CSS selectors may fail due to dynamic rendering or missing accessibility attributes. Multiple attempts may be needed; ensure the search results are fully loaded before clicking.",
+        "anti_pattern": "Avoid relying solely on static selectors like '.s-search-results .s-result-item h2 a' for click actions, as these may not be interactable or present in the accessibility tree.",
+        "confidence": 0.8,
+        "success_count": 1,
+        "last_seen": "2026-06-09"
+      },
+      {
+        "id": "31f3886a",
+        "trigger": "Reading product price on detail pages",
+        "pattern": "If price is not found using standard IDs ('priceblock_ourprice', 'priceblock_de'), search for price within specific regions (e.g., 'e261') in the DOM. This workaround is necessary due to price elements sometimes being outside the accessibility tree or rendered in alternate containers.",
+        "anti_pattern": "Avoid assuming price will always be under the standard ID; fallback to region-based DOM search if initial read fails.",
+        "confidence": 0.7,
+        "success_count": 1,
+        "last_seen": "2026-06-09"
+      },
+      {
+        "id": "1c305206",
+        "trigger": "Rapid navigation from search input to results",
+        "pattern": "After filling the search input and triggering the search (e.g., pressing Enter), wait for the search results page to fully load before interacting with result elements. Timing dependency is critical to avoid false negatives when reading or clicking results.",
+        "anti_pattern": "",
+        "confidence": 0.9,
+        "success_count": 1,
+        "last_seen": "2026-06-09"
+      }
+    ]
+  }
+}

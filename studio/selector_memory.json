@@ -585,5 +585,69 @@
         "last_failure": null
       }
     ]
+  },
+  "### Result\n\"www.amazon.sg": {
+    "entries": [
+      {
+        "id": "918c5c8a",
+        "step_intent": "Fill input[name=\"field-keywords\"] with \"Magic Tree House Boxed Set\"",
+        "action": "fill",
+        "selector": "input[name=\"field-keywords\"]",
+        "value": "Magic Tree House Boxed Set",
+        "success_count": 2,
+        "failure_count": 0,
+        "confidence": "medium",
+        "last_success": "2026-06-09",
+        "last_failure": null
+      },
+      {
+        "id": "25c94c9f",
+        "step_intent": "Press Enter key in input[name=\"field-keywords\"] to submit the search",
+        "action": "key",
+        "selector": "input[name=\"field-keywords\"]",
+        "value": "Enter",
+        "success_count": 2,
+        "failure_count": 0,
+        "confidence": "medium",
+        "last_success": "2026-06-09",
+        "last_failure": null
+      },
+      {
+        "id": "7bdce10c",
+        "step_intent": "Click on the first product link in the search results",
+        "action": "click",
+        "selector": "first product link in search results",
+        "value": null,
+        "success_count": 1,
+        "failure_count": 0,
+        "confidence": "medium",
+        "last_success": "2026-06-09",
+        "last_failure": null
+      },
+      {
+        "id": "50d6f2cc",
+        "step_intent": "If validation passes, click the \"Add to Cart\" button (id=\"add-to-cart-button\")",
+        "action": "click",
+        "selector": "first Add to Cart button (id=add-to-cart-button)",
+        "value": null,
+        "success_count": 1,
+        "failure_count": 0,
+        "confidence": "medium",
+        "last_success": "2026-06-09",
+        "last_failure": null
+      },
+      {
+        "id": "7c85f7bc",
+        "step_intent": "Click on the first product link in the search results",
+        "action": "click",
+        "selector": "e225",
+        "value": null,
+        "success_count": 1,
+        "failure_count": 0,
+        "confidence": "medium",
+        "last_success": "2026-06-09",
+        "last_failure": null
+      }
+    ]
   }
 }
