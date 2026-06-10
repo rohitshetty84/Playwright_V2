@@ -43,10 +43,23 @@ jobs:
         uses: actions/checkout@v4
 
       # ── 2. Azure login ───────────────────────────────────────────────────────
+      # azure/login action broke JSON-creds support in recent releases.
+      # Parse the secret ourselves and call az login directly — works with both
+      # old format (appId/password/tenant) and new format (clientId/clientSecret/tenantId).
       - name: Azure login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+        env:
+          AZURE_CREDS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          CLIENT_ID=$(echo "$AZURE_CREDS"     | jq -r '.clientId    // .appId')
+          CLIENT_SECRET=$(echo "$AZURE_CREDS" | jq -r '.clientSecret // .password')
+          TENANT_ID=$(echo "$AZURE_CREDS"     | jq -r '.tenantId    // .tenant')
+          SUB_ID=$(echo "$AZURE_CREDS"        | jq -r '.subscriptionId // empty')
+          echo "::add-mask::$CLIENT_SECRET"
+          az login --service-principal \
+            --username "$CLIENT_ID" \
+            --password "$CLIENT_SECRET" \
+            --tenant  "$TENANT_ID"
+          [ -n "$SUB_ID" ] && az account set --subscription "$SUB_ID" || true
 
       # ── 3. Build image in Azure (no Docker runner needed) ───────────────────
       - name: Build image via az acr build
