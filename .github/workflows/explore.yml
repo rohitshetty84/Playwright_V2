@@ -1,0 +1,126 @@
+name: Explore — AI Browser Exploration
+
+# Triggered by POST /api/explore/start when EXPLORE_MODE=github_runner.
+# Runs the full AI exploration loop (Azure OpenAI + Playwright MCP) on a
+# GitHub-hosted runner, then POSTs results back to the Studio API.
+
+on:
+  workflow_dispatch:
+    inputs:
+      exploration_id:
+        description: 'Exploration ID (matches Studio record)'
+        required: true
+        type: string
+      studio_url:
+        description: 'Public Studio URL for callbacks (e.g. https://studio.azurecontainerapps.io)'
+        required: true
+        type: string
+      test_case:
+        description: 'Test case description'
+        required: true
+        type: string
+      storage_state:
+        description: 'Auth session name (e.g. successfactors) — leave empty to skip auth'
+        required: false
+        type: string
+        default: ''
+      max_steps:
+        description: 'Max exploration steps'
+        required: false
+        type: string
+        default: '25'
+      app_context:
+        description: 'Application context for step enrichment'
+        required: false
+        type: string
+        default: 'SAP SuccessFactors Onboarding 2.0'
+      headless:
+        description: 'Run browser headless (true/false)'
+        required: false
+        type: string
+        default: 'true'
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-explore-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r studio/requirements.txt
+
+      - name: Install Node dependencies & @playwright/mcp
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm install -g @playwright/mcp
+
+      - name: Install Playwright browsers
+        run: |
+          npx playwright install --with-deps chromium
+          npx @playwright/mcp install-browser chromium
+
+      - name: Authenticate (run auth.ts for storage state)
+        if: ${{ inputs.storage_state != '' }}
+        env:
+          CI: 'true'
+          SF_BASE_URL:  ${{ secrets.SF_BASE_URL }}
+          SF_USERNAME:  ${{ secrets.SF_USERNAME }}
+          SF_PASSWORD:  ${{ secrets.SF_PASSWORD }}
+          # Add more APP_* blocks here as you onboard additional apps
+        run: |
+          echo "[auth] Logging in for storage_state=${{ inputs.storage_state }}"
+          npx ts-node scripts/auth.ts
+          echo "[auth] Session files:"
+          ls -la studio/.auth/ 2>/dev/null || echo "(no .auth dir yet)"
+
+      - name: Run AI exploration
+        env:
+          # ── Exploration config (from workflow inputs) ──────────────────────
+          EXPLORATION_ID:   ${{ inputs.exploration_id }}
+          STUDIO_URL:       ${{ inputs.studio_url }}
+          TEST_CASE:        ${{ inputs.test_case }}
+          STORAGE_STATE:    ${{ inputs.storage_state }}
+          MAX_STEPS:        ${{ inputs.max_steps }}
+          APP_CONTEXT:      ${{ inputs.app_context }}
+          HEADLESS:         ${{ inputs.headless }}
+          # ── Azure OpenAI (from repository secrets) ─────────────────────────
+          AZURE_OPENAI_ENDPOINT:     ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY:      ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_API_VERSION:  ${{ secrets.AZURE_OPENAI_API_VERSION }}
+          AZURE_OPENAI_DEPLOYMENT:   ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}
+          AZURE_REASONING_DEPLOYMENT: ${{ secrets.AZURE_REASONING_DEPLOYMENT }}
+          AZURE_REASONING_API_VERSION: ${{ secrets.AZURE_REASONING_API_VERSION }}
+          # ── Studio callback auth ───────────────────────────────────────────
+          STUDIO_CALLBACK_TOKEN: ${{ secrets.STUDIO_CALLBACK_TOKEN }}
+        run: python scripts/explore_runner.py
+
+      - name: Upload exploration artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exploration-${{ inputs.exploration_id }}
+          path: |
+            studio/explorations/${{ inputs.exploration_id }}/
+            studio/logs/
+          retention-days: 14

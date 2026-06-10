@@ -118,7 +118,9 @@ const AUTH_TARGETS: AuthTarget[] = [
     process.exit(0);
   }
 
-  const browser = await chromium.launch({ headless: false }); // show browser so you can watch / debug
+  // CI=true (GitHub Actions) → run headless since there's no display and no MFA
+  const headless = process.env.CI === 'true';
+  const browser = await chromium.launch({ headless });
 
   for (const target of targets) {
     const outFile = path.join(AUTH_DIR, `${target.name}.json`);

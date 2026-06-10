@@ -15,3 +15,6 @@ python-dotenv==1.0.1
 pydantic==2.9.2
 requests==2.32.3        # used by /api/trigger-ci to call the GitHub API
 playwright==1.48.0      # used by validate_test_locally + screenshot helpers
+openpyxl==3.1.2         # Excel workbook parsing and batch result generation
+python-multipart==0.0.6 # FastAPI file upload support for Excel batch uploads
+PyNaCl==1.5.0           # GitHub secret encryption (sealed box / libsodium)

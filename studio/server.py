@@ -31,6 +31,8 @@ from services.assertions import evaluate as evaluate_assertions  # P1-5
 from services.git_sync import sync_goldens as _sync_goldens_service  # P2-2
 from services.vision_policy import decide as decide_vision, log_decision  # P2-3
 from services.mcp_bridge import PlaywrightMCPBridge  # MCP: Playwright MCP bridge
+from services.github import get_github_config, dispatch_github_workflow, dispatch_exploration_workflow
+from routes.batch import router as batch_router
 
 # ── Configure Logging ──────────────────────────────────────────────────────────
 BASE = Path(__file__).parent
@@ -256,6 +258,7 @@ NAV_PAUSE_MS      = 2000 # Post-navigation pause so JS-rendered elements appear
 app = FastAPI(title="Playwright AI Studio", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+app.include_router(batch_router, prefix="/api/batch", tags=["Batch"])
 
 @app.on_event("startup")
 async def _startup_cleanup():
@@ -1089,7 +1092,7 @@ async def capture_screenshot_b64(url: str, label: str = "") -> Optional[str]:
         return None
     try:
         pb = await async_playwright().start()
-        browser = await pb.chromium.launch()
+        browser = await pb.chromium.launch(headless=True)
         page = await browser.new_page()
         for _w, _t in [('domcontentloaded', 30000), ('load', 30000), ('commit', 45000)]:
             try:
@@ -1131,7 +1134,7 @@ async def analyze_page_with_vision(url: str, test_description: str) -> str:
 
         # Launch browser
         pb = await async_playwright().start()
-        browser = await pb.chromium.launch()
+        browser = await pb.chromium.launch(headless=True)
         page = await browser.new_page()
 
         # Navigate to page with fallback strategies
@@ -1299,7 +1302,7 @@ async def synthesize_with_validation(req: SynthesizeRequest):
             logger.info("[PHASE 0A] Navigating to page and capturing screenshot...")
 
             pb = await async_playwright().start()
-            browser = await pb.chromium.launch()
+            browser = await pb.chromium.launch(headless=True)
             page = await browser.new_page()
 
             # Try progressively more lenient wait strategies so sites with
@@ -1605,7 +1608,7 @@ Output ONLY the code, no markdown or explanations."""
                         f"navigating to {url} for a fresh screenshot"
                     )
                     pb2      = await async_playwright().start()
-                    browser2 = await pb2.chromium.launch()
+                    browser2 = await pb2.chromium.launch(headless=True)
                     page2    = await browser2.new_page()
                     # Load auth if available for this URL
                     for _dom, _aname in _DOMAIN_AUTH_MAP.items() if hasattr(locals(), '_DOMAIN_AUTH_MAP') else []:
@@ -1615,7 +1618,7 @@ Output ONLY the code, no markdown or explanations."""
                                 await browser2.close()
                                 await pb2.stop()
                                 pb2      = await async_playwright().start()
-                                browser2 = await pb2.chromium.launch()
+                                browser2 = await pb2.chromium.launch(headless=True)
                                 ctx2     = await browser2.new_context(storage_state=str(_ap))
                                 page2    = await ctx2.new_page()
                             break
@@ -2547,116 +2550,6 @@ async def get_healing_status(golden_id: str):
         "recommendation": stuck.get("recommendation", "CONTINUE_AUTO_HEALING"),
         "recentHistory": history[-5:] if history else [],  # Last 5 attempts
     }
-
-# ─ GitHub workflow dispatch helpers ─────────────────────────────────────────
-def parse_github_remote(url: str):
-    if not url:
-        return None
-    if url.startswith("git@github.com:"):
-        path = url.split(":", 1)[1]
-    elif url.startswith("https://github.com/"):
-        path = url[len("https://github.com/"):]
-    elif url.startswith("ssh://git@github.com/"):
-        path = url.split("github.com/", 1)[1]
-    else:
-        return None
-
-    if path.endswith(".git"):
-        path = path[:-4]
-    parts = path.strip("/").split("/")
-    return tuple(parts) if len(parts) == 2 else None
-
-
-def get_github_config():
-    # Reload env each time so updates to .env are picked up while the server runs.
-    if ROOT_ENV.exists():
-        load_dotenv(ROOT_ENV, override=True)
-
-    gh_token = os.getenv("GITHUB_TOKEN")
-    gh_owner = os.getenv("GITHUB_OWNER")
-    gh_repo = os.getenv("GITHUB_REPO")
-    gh_workflow = os.getenv("GITHUB_WORKFLOW", "playwright.yml")
-    gh_branch = os.getenv("GITHUB_BRANCH", "main")
-
-    if not gh_owner or not gh_repo:
-        try:
-            remote_url = subprocess.check_output(
-                ["git", "config", "--get", "remote.origin.url"],
-                cwd=BASE.parent,
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-            parsed = parse_github_remote(remote_url)
-            if parsed:
-                gh_owner, gh_repo = parsed
-        except Exception:
-            pass
-
-    if not all([gh_token, gh_owner, gh_repo]):
-        raise HTTPException(
-            status_code=500,
-            detail="GitHub credentials not configured in .env (GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO)"
-        )
-
-    return gh_token, gh_owner, gh_repo, gh_workflow, gh_branch
-
-
-def dispatch_github_workflow(inputs: dict):
-    gh_token, gh_owner, gh_repo, gh_workflow, gh_branch = get_github_config()
-    url = f"https://api.github.com/repos/{gh_owner}/{gh_repo}/actions/workflows/{gh_workflow}/dispatches"
-    headers = {
-        "Authorization": f"token {gh_token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-    payload = {
-        "ref": gh_branch,
-        "inputs": inputs,
-    }
-
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-
-        if response.status_code == 204:
-            return {
-                "status": "success",
-                "message": "GitHub workflow dispatched",
-                "inputs": inputs,
-            }
-
-        # Handle error responses with better detail
-        try:
-            error_detail = response.json().get("message", response.text)
-        except Exception:
-            error_detail = response.text
-
-        if response.status_code == 401:
-            raise HTTPException(status_code=401, detail="Invalid GitHub token")
-        elif response.status_code == 404:
-            raise HTTPException(status_code=404, detail=f"Workflow not found: {gh_workflow}")
-        else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"GitHub API error: {error_detail}"
-            )
-
-    except requests.Timeout:
-        raise HTTPException(
-            status_code=504,
-            detail="GitHub API timeout (>15s) - workflow may still be triggered"
-        )
-    except requests.ConnectionError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Cannot reach GitHub API - check internet connection: {str(e)}"
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Unexpected error triggering workflow: {str(e)}"
-        )
-
 
 # ─ Trigger CI run by golden ID ───────────────────────────────────────────────
 @app.post("/api/trigger-ci/{golden_id}")
@@ -5398,89 +5291,41 @@ Return ONLY the numbered step list. No introduction, no summary."""
         raise HTTPException(status_code=500, detail=f"Enrichment failed: {e}")
 
 
-async def _run_exploration_with_restarts(
-    req: ExploreRequest,
-    outer_id: str,
-    queue: Optional[asyncio.Queue],
-) -> dict:
-    """Run _run_exploration up to max_restarts+1 times on cascade failure.
-
-    A "cascade failure" is when one real step failure blocks ≥2 downstream steps.
-    All attempts stream events to the same SSE queue so the client sees a continuous
-    feed. Each attempt stores its data under a distinct exploration directory:
-      attempt 1 → {outer_id}
-      attempt 2 → {outer_id}-r2
-      ...
-    The final attempt's explorationId is returned so the frontend knows which
-    directory to use for test-script generation.
-    """
-    max_attempts = req.max_restarts + 1
-    last_result: dict = {}
-
-    for attempt in range(1, max_attempts + 1):
-        is_last = (attempt == max_attempts)
-        inner_id = outer_id if attempt == 1 else f"{outer_id}-r{attempt}"
-
-        if attempt > 1:
-            await _emit(queue, "log", level="warn",
-                        message=f"🔁 Full restart — attempt {attempt}/{max_attempts} (new exploration: {inner_id})…")
-
-        # Register cancel for this inner attempt so the existing cancel check works.
-        _explore_cancel[inner_id] = _explore_cancel.get(outer_id, asyncio.Event())
-
-        last_result = await _run_exploration(
-            req, inner_id, queue=queue,
-            _suppress_close=not is_last,   # wrapper owns teardown for non-last attempts
-        )
-
-        if is_last:
-            break
-
-        # Decide whether to restart: a cascade is ≥2 blocked steps from 1 real failure
-        steps = last_result.get("steps", [])
-        real_failures = [
-            s for s in steps
-            if not s.get("success") and s.get("action") not in ("blocked", "", None)
-        ]
-        blocked = [s for s in steps if s.get("action") == "blocked"]
-
-        if not real_failures or len(blocked) < 2:
-            # Clean run or isolated failure — no restart benefit
-            is_last = True
-            if queue:
-                await queue.put(None)
-            _explore_queues.pop(outer_id, None)
-            _explore_cancel.pop(outer_id, None)
-            break
-
-        await _emit(queue, "log", level="warn",
-                    message=(
-                        f"🔁 Cascade detected: {len(real_failures)} failure(s) → "
-                        f"{len(blocked)} blocked steps. Restarting from step 1…"
-                    ))
-
-    return last_result
-
-
-@app.post("/api/explore")
-async def explore_test_case_sync(req: ExploreRequest):
-    """Synchronous explore — blocks until complete. Kept for backward compatibility."""
-    exploration_id = str(uuid.uuid4())[:8]
-    return await _run_exploration(req, exploration_id, queue=None)
-
-
 @app.post("/api/explore/start")
 async def explore_start(req: ExploreRequest):
     """
-    Start an exploration as a background task. Returns immediately with explorationId.
-    Connect to GET /api/explorations/{id}/stream to receive live SSE events.
+    Start an exploration by dispatching to a GitHub Actions runner.
+    Returns immediately; the runner POSTs results back via /api/explorations/{id}/complete.
+    The SSE stream receives a 'complete' event when the runner finishes.
     """
     exploration_id = str(uuid.uuid4())[:8]
+    studio_url     = os.getenv("STUDIO_PUBLIC_URL", "").strip()
+
+    if not studio_url:
+        raise HTTPException(
+            status_code=500,
+            detail="STUDIO_PUBLIC_URL env var must be set (the public URL of this Studio instance)",
+        )
+
     queue: asyncio.Queue = asyncio.Queue()
-    _explore_queues[exploration_id]  = queue
-    _explore_cancel[exploration_id]  = asyncio.Event()   # starts unset (not cancelled)
-    asyncio.create_task(_run_exploration_with_restarts(req, exploration_id, queue))
-    return {"explorationId": exploration_id, "streamUrl": f"/api/explorations/{exploration_id}/stream"}
+    _explore_queues[exploration_id] = queue
+    _explore_cancel[exploration_id] = asyncio.Event()
+
+    dispatch_exploration_workflow(
+        exploration_id = exploration_id,
+        studio_url     = studio_url,
+        test_case      = req.test_case,
+        storage_state  = req.storage_state or "",
+        max_steps      = req.max_steps,
+        headless       = req.headless,
+    )
+    logger.info(f"[explore/start] Dispatched to GitHub runner — {exploration_id}")
+    return {
+        "explorationId": exploration_id,
+        "mode":          "github_runner",
+        "streamUrl":     f"/api/explorations/{exploration_id}/stream",
+        "message":       "Exploration dispatched to GitHub runner. Results will arrive via callback.",
+    }
 
 
 @app.get("/api/explorations/{exploration_id}/stream")
@@ -5684,6 +5529,246 @@ async def trigger_cleanup():
 
 
 # ─ Health check endpoints ──────────────────────────────────────────────────────
+# ── GitHub runner: one-click secret sync ─────────────────────────────────────
+# Reads env vars already present in this running container and pushes them as
+# GitHub Actions secrets so explore.yml can use them on the runner.
+# Useful when EXPLORE_MODE=github_runner is being activated on Azure:
+# the container already has all the keys; this just mirrors them to GitHub.
+
+_GITHUB_SECRET_MAP = [
+    # (env_var_name, github_secret_name, required)
+    ("AZURE_OPENAI_API_KEY",         "AZURE_OPENAI_API_KEY",         True),
+    ("AZURE_OPENAI_ENDPOINT",        "AZURE_OPENAI_ENDPOINT",        True),
+    ("AZURE_OPENAI_API_VERSION",     "AZURE_OPENAI_API_VERSION",     True),
+    ("AZURE_OPENAI_DEPLOYMENT",      "AZURE_OPENAI_DEPLOYMENT",      True),
+    ("AZURE_REASONING_DEPLOYMENT",   "AZURE_REASONING_DEPLOYMENT",   False),
+    ("AZURE_REASONING_API_VERSION",  "AZURE_REASONING_API_VERSION",  False),
+    ("SF_BASE_URL",                  "SF_BASE_URL",                  False),
+    ("SF_USERNAME",                  "SF_USERNAME",                  False),
+    ("SF_PASSWORD",                  "SF_PASSWORD",                  False),
+    ("STUDIO_CALLBACK_TOKEN",        "STUDIO_CALLBACK_TOKEN",        True),
+]
+
+
+def _encrypt_github_secret(public_key_b64: str, value: str) -> str:
+    """Encrypt a secret value using the repo's NaCl public key."""
+    try:
+        from base64 import b64encode
+        from nacl import encoding, public as nacl_public
+        pk  = nacl_public.PublicKey(public_key_b64.encode(), encoding.Base64Encoder())
+        box = nacl_public.SealedBox(pk)
+        return b64encode(box.encrypt(value.encode("utf-8"))).decode("utf-8")
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="PyNaCl is not installed. Run: pip install PyNaCl",
+        )
+
+
+@app.post("/api/setup/sync-github-secrets")
+async def sync_github_secrets():
+    """
+    Push env vars from this container to GitHub Actions secrets, then automatically
+    update the Azure Container App's own env vars (STUDIO_CALLBACK_TOKEN,
+    EXPLORE_MODE, STUDIO_PUBLIC_URL) so everything is wired up in one click.
+    """
+    import secrets as _secrets_mod
+
+    # ── 1. Auto-generate STUDIO_CALLBACK_TOKEN if not already set ─────────────
+    callback_token = os.getenv("STUDIO_CALLBACK_TOKEN", "").strip()
+    generated_token: Optional[str] = None
+    if not callback_token:
+        generated_token = _secrets_mod.token_hex(32)
+        os.environ["STUDIO_CALLBACK_TOKEN"] = generated_token
+        callback_token = generated_token
+        logger.info("[setup] Generated new STUDIO_CALLBACK_TOKEN")
+
+    # ── 2. Push secrets to GitHub ─────────────────────────────────────────────
+    gh_token, gh_owner, gh_repo, _wf, _branch = get_github_config()
+    gh_headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+    base = f"https://api.github.com/repos/{gh_owner}/{gh_repo}"
+
+    r = requests.get(f"{base}/actions/secrets/public-key", headers=gh_headers, timeout=10)
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Could not fetch GitHub public key: {r.text[:200]}")
+    key_data, key_id, public_key = r.json(), r.json()["key_id"], r.json()["key"]
+
+    gh_report = {"set": [], "skipped": [], "missing": []}
+    for env_var, secret_name, required in _GITHUB_SECRET_MAP:
+        value = os.getenv(env_var, "").strip()
+        if not value:
+            gh_report["missing" if required else "skipped"].append(secret_name)
+            continue
+        encrypted = _encrypt_github_secret(public_key, value)
+        resp = requests.put(
+            f"{base}/actions/secrets/{secret_name}",
+            headers=gh_headers,
+            json={"encrypted_value": encrypted, "key_id": key_id},
+            timeout=10,
+        )
+        if resp.status_code in (201, 204):
+            gh_report["set"].append(secret_name)
+            logger.info(f"[setup] GitHub secret set: {secret_name}")
+        else:
+            gh_report["missing"].append(secret_name)
+            logger.warning(f"[setup] Failed to set {secret_name}: {resp.status_code}")
+
+    # ── 3. Update the Azure Container App's own env vars ─────────────────────
+    # Derive STUDIO_PUBLIC_URL from Azure's built-in CONTAINER_APP_HOSTNAME if
+    # not explicitly configured.
+    studio_url = os.getenv("STUDIO_PUBLIC_URL", "").strip()
+    if not studio_url:
+        hostname = os.getenv("CONTAINER_APP_HOSTNAME", "").strip()
+        if hostname:
+            studio_url = f"https://{hostname}"
+
+    aca_update = await _update_container_app_env({
+        "STUDIO_CALLBACK_TOKEN": callback_token,
+        "EXPLORE_MODE":          "github_runner",
+        **({"STUDIO_PUBLIC_URL": studio_url} if studio_url else {}),
+    })
+
+    return {
+        **gh_report,
+        "generated_token": generated_token,
+        "azure_update":    aca_update,
+        "ready":           len(gh_report["missing"]) == 0,
+    }
+
+
+# ── Azure Container App env-var updater ───────────────────────────────────────
+
+def _get_azure_mgmt_token() -> str:
+    """
+    Get an Azure management API bearer token.
+
+    Tries in order:
+      1. Managed Identity (IMDS) — works automatically inside Azure Container Apps.
+      2. Service principal — uses AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET.
+
+    Raises RuntimeError if neither is available.
+    """
+    # --- Option 1: Managed Identity via IMDS (inside Azure) ------------------
+    try:
+        r = requests.get(
+            "http://169.254.169.254/metadata/identity/oauth2/token",
+            params={"api-version": "2018-02-01", "resource": "https://management.azure.com/"},
+            headers={"Metadata": "true"},
+            timeout=3,   # fails fast outside Azure
+        )
+        if r.status_code == 200:
+            token = r.json().get("access_token", "")
+            if token:
+                logger.info("[setup/azure] Authenticated via Managed Identity")
+                return token
+    except requests.RequestException:
+        pass
+
+    # --- Option 2: Service principal -----------------------------------------
+    tenant = os.getenv("AZURE_TENANT_ID", "").strip()
+    client = os.getenv("AZURE_CLIENT_ID", "").strip()
+    secret = os.getenv("AZURE_CLIENT_SECRET", "").strip()
+    if tenant and client and secret:
+        r = requests.post(
+            f"https://login.microsoftonline.com/{tenant}/oauth2/token",
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     client,
+                "client_secret": secret,
+                "resource":      "https://management.azure.com/",
+            },
+            timeout=10,
+        )
+        if r.status_code == 200:
+            token = r.json().get("access_token", "")
+            if token:
+                logger.info("[setup/azure] Authenticated via Service Principal")
+                return token
+        raise RuntimeError(f"Service principal auth failed: {r.status_code} {r.text[:200]}")
+
+    raise RuntimeError(
+        "No Azure credentials found. "
+        "Assign a Managed Identity to the Container App, or set "
+        "AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET."
+    )
+
+
+async def _update_container_app_env(env_updates: dict) -> dict:
+    """
+    Upsert env vars on the running Azure Container App.
+    Returns a status dict describing what happened.
+    """
+    sub  = os.getenv("AZURE_SUBSCRIPTION_ID", "").strip()
+    rg   = os.getenv("AZURE_RESOURCE_GROUP",  "").strip()
+    app  = os.getenv("AZURE_CONTAINER_APP_NAME", "").strip()
+
+    # Fall back: Azure injects CONTAINER_APP_NAME automatically
+    if not app:
+        app = os.getenv("CONTAINER_APP_NAME", "").strip()
+
+    if not all([sub, rg, app]):
+        missing = [k for k, v in {"AZURE_SUBSCRIPTION_ID": sub,
+                                   "AZURE_RESOURCE_GROUP": rg,
+                                   "AZURE_CONTAINER_APP_NAME": app}.items() if not v]
+        logger.warning(f"[setup/azure] Skipping ACA update — missing: {missing}")
+        return {"skipped": True, "reason": f"Set these env vars to enable auto-update: {missing}"}
+
+    try:
+        token = _get_azure_mgmt_token()
+    except RuntimeError as exc:
+        logger.warning(f"[setup/azure] Auth failed: {exc}")
+        return {"skipped": True, "reason": str(exc)}
+
+    api_version = "2024-03-01"
+    aca_base    = (
+        f"https://management.azure.com/subscriptions/{sub}"
+        f"/resourceGroups/{rg}/providers/Microsoft.App/containerApps/{app}"
+        f"?api-version={api_version}"
+    )
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    # GET current config
+    r = requests.get(aca_base, headers=headers, timeout=15)
+    if r.status_code != 200:
+        msg = f"GET container app failed: {r.status_code} {r.text[:200]}"
+        logger.warning(f"[setup/azure] {msg}")
+        return {"skipped": True, "reason": msg}
+
+    body       = r.json()
+    containers = body.get("properties", {}).get("template", {}).get("containers", [])
+    if not containers:
+        return {"skipped": True, "reason": "No containers found in app template"}
+
+    # Upsert env vars in the first container (the Studio)
+    existing_env: list = containers[0].get("env", [])
+    existing_map = {e["name"]: i for i, e in enumerate(existing_env)}
+
+    for key, value in env_updates.items():
+        entry = {"name": key, "value": value}
+        if key in existing_map:
+            existing_env[existing_map[key]] = entry   # update in-place
+        else:
+            existing_env.append(entry)               # add new
+
+    containers[0]["env"] = existing_env
+
+    # PATCH back — send only the properties we're changing
+    patch_body = {
+        "properties": {
+            "template": body["properties"]["template"]
+        }
+    }
+    pr = requests.patch(aca_base, headers=headers, json=patch_body, timeout=30)
+    if pr.status_code in (200, 201, 202):
+        updated_keys = list(env_updates.keys())
+        logger.info(f"[setup/azure] Container App env updated: {updated_keys}")
+        return {"updated": updated_keys, "status": pr.status_code}
+    else:
+        msg = f"PATCH failed: {pr.status_code} {pr.text[:300]}"
+        logger.warning(f"[setup/azure] {msg}")
+        return {"skipped": True, "reason": msg}
+
+
 @app.get("/api/health")
 async def health_check():
     """Basic health check"""
@@ -5724,6 +5809,118 @@ async def check_github_health():
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"GitHub check failed: {str(e)}")
+
+
+# ── GitHub runner: memory export/import ──────────────────────────────────────
+# The explore_runner.py script running on a GitHub Actions runner calls these
+# endpoints to download the latest learned memory before the run, and to upload
+# updated memory after the run so learnings accumulate on the persistent volume.
+
+_CALLBACK_TOKEN = os.getenv("STUDIO_CALLBACK_TOKEN", "")
+
+
+def _verify_callback(request_token: str) -> None:
+    """Raise 401 if callback token is wrong (only enforced when a token is configured)."""
+    if _CALLBACK_TOKEN and request_token != _CALLBACK_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid callback token")
+
+
+@app.get("/api/memory/export")
+async def export_memory(x_callback_token: str = ""):
+    """Return selector_memory, exploration_patterns, and learned_rules as JSON."""
+    _verify_callback(x_callback_token)
+    return {
+        "selector_memory":      _load_selector_memory(),
+        "exploration_patterns": _load_exploration_patterns(),
+        "learned_rules":        _load_learned_rules(),
+    }
+
+
+class MemoryImportPayload(BaseModel):
+    selector_memory:      Optional[dict] = None
+    exploration_patterns: Optional[dict] = None
+    learned_rules:        Optional[dict] = None
+
+
+@app.post("/api/memory/import")
+async def import_memory(payload: MemoryImportPayload, x_callback_token: str = ""):
+    """Merge memory updates from the runner back into the persistent volume files."""
+    _verify_callback(x_callback_token)
+    updated = []
+    if payload.selector_memory is not None:
+        SELECTOR_MEMORY_FILE.write_text(json.dumps(payload.selector_memory, indent=2))
+        updated.append("selector_memory")
+    if payload.exploration_patterns is not None:
+        EXPLORATION_PATTERNS_FILE.write_text(json.dumps(payload.exploration_patterns, indent=2))
+        updated.append("exploration_patterns")
+    if payload.learned_rules is not None:
+        LEARNED_RULES_FILE.write_text(json.dumps(payload.learned_rules, indent=2))
+        updated.append("learned_rules")
+    logger.info(f"[memory/import] Updated: {updated}")
+    return {"imported": updated}
+
+
+# ── GitHub runner: exploration result callback ────────────────────────────────
+
+class RunnerCompletePayload(BaseModel):
+    explorationId: Optional[str] = None
+    steps:         Optional[list] = None
+    status:        Optional[str]  = None
+    error:         Optional[str]  = None
+    testCase:      Optional[str]  = None
+    # Any extra fields from _run_exploration result are captured via __fields_set__
+
+
+@app.post("/api/explorations/{exploration_id}/complete")
+async def runner_complete(exploration_id: str, payload: dict, x_callback_token: str = ""):
+    """
+    Called by explore_runner.py when the GitHub Actions exploration job finishes.
+    Saves the result to the explorations dir and signals any waiting SSE clients.
+    """
+    _verify_callback(x_callback_token)
+
+    expl_dir = EXPLORATIONS_DIR / exploration_id
+    expl_dir.mkdir(parents=True, exist_ok=True)
+
+    # Persist the steps log
+    steps = payload.get("steps", [])
+    (expl_dir / "steps.json").write_text(json.dumps({
+        "explorationId": exploration_id,
+        "steps":         steps,
+        "status":        payload.get("status", "complete"),
+        "testCase":      payload.get("testCase", ""),
+        "completedAt":   datetime.now().isoformat(),
+        "source":        "github_runner",
+    }, indent=2, default=str))
+
+    # Persist the exploration markdown if present
+    md = payload.get("markdownContent", "") or _generate_exploration_md(
+        exploration_id, payload.get("testCase", ""), steps
+    )
+    (expl_dir / "exploration.md").write_text(md)
+
+    # Signal any SSE client that may be polling this exploration
+    q = _explore_queues.get(exploration_id)
+    if q:
+        await q.put({
+            "type":            "complete",
+            "explorationId":   exploration_id,
+            "stepsCompleted":  len(steps),
+            "markdownContent": md,
+            "steps":           steps,
+            "source":          "github_runner",
+        })
+        await q.put(None)  # sentinel — closes the SSE stream
+        _explore_queues.pop(exploration_id, None)
+        _explore_cancel.pop(exploration_id, None)
+
+    if payload.get("error"):
+        logger.warning(f"[runner/complete] {exploration_id} finished with error: {payload['error']}")
+    else:
+        logger.info(f"[runner/complete] {exploration_id} saved — {len(steps)} steps")
+
+    return {"saved": exploration_id, "steps": len(steps)}
+
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────

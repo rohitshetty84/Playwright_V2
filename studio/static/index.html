@@ -429,6 +429,53 @@
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  /* ── Batch status pills ── */
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 9px; border-radius: 12px;
+    font-size: 11px; font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; border: 1px solid; white-space: nowrap;
+  }
+  .sp-pending { background:#F3F4F6; border-color:#D1D5DB; color:#6B7280; }
+  .sp-synth   { background:#EDE9FE; border-color:#C4B5FD; color:#5B21B6; }
+  .sp-ready   { background:#ECFDF5; border-color:#6EE7B7; color:#065F46; }
+  .sp-queued  { background:#FFFBEB; border-color:#FCD34D; color:#92400E; }
+  .sp-ci      { background:#EFF6FF; border-color:#BFDBFE; color:#1E40AF; }
+  .sp-pass    { background:#ECFDF5; border-color:#86EFAC; color:#166534; }
+  .sp-fail    { background:#FEF2F2; border-color:#FECACA; color:#991B1B; }
+  .sp-cancel  { background:#F3F4F6; border-color:#D1D5DB; color:#374151; }
+
+  @keyframes blink-glow { 0%,100%{opacity:1} 50%{opacity:0.55} }
+  .sp-pulse { animation: blink-glow 1.4s ease-in-out infinite; }
+
+  /* ── Batch row table ── */
+  .batch-tbl { width:100%; border-collapse:collapse; font-size:12px; }
+  .batch-tbl th {
+    text-align:left; padding:7px 10px;
+    font-size:10px; font-weight:700; color:var(--text2);
+    text-transform:uppercase; letter-spacing:0.06em;
+    border-bottom:1px solid var(--border);
+    background:var(--surface2); position:sticky; top:0; z-index:1;
+  }
+  .batch-tbl td { padding:7px 10px; border-bottom:1px solid var(--border); color:var(--text); vertical-align:middle; }
+  .batch-tbl tr:last-child td { border-bottom:none; }
+  .batch-tbl tbody tr:hover td { background:var(--surface2); }
+  .tc-cell { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text3); font-family:'JetBrains Mono',monospace; font-size:11px; }
+  .gn-cell { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--accent2); max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* ── Batch summary + progress ── */
+  .batch-summary { display:flex; gap:6px; flex-wrap:wrap; padding:8px 0 4px; }
+  .batch-mini-prog { height:3px; background:var(--border2); border-radius:2px; overflow:hidden; margin:4px 0 10px; }
+  .batch-mini-prog-fill { height:100%; border-radius:2px; transition:width 0.5s ease; background:linear-gradient(90deg,var(--accent),#7c3aed); }
+
+  /* ── Batch live log ── */
+  .batch-log {
+    background:#111827; border:1px solid #1F2937; border-radius:8px;
+    padding:10px 12px; max-height:140px; overflow-y:auto;
+    font-family:'JetBrains Mono',monospace; font-size:11px; line-height:1.7; color:#E5E7EB;
+    margin-top:10px;
+  }
 </style>
 </head>
 <body>
@@ -454,6 +501,10 @@
       <div class="nav-item" data-tab="golden">
         <span class="icon">📄</span> Golden Files
         <span class="nav-badge" id="nav-golden-count">0</span>
+      </div>
+      <div class="nav-item" data-tab="batch">
+        <span class="icon">📥</span> Batch Regression
+        <span class="nav-badge" id="nav-batch-count">0</span>
       </div>
       <div class="nav-item" data-tab="runs">
         <span class="icon">▶</span> Run History
@@ -495,6 +546,26 @@
         </div>
         <div id="sync-status" style="display:none;font-size:12px;padding:8px 12px;border-radius:6px;margin-bottom:10px"></div>
         <div id="golden-list"></div>
+      </div>
+
+      <!-- ═══════════════════════════ BATCH REGRESSION ═══════════════════════════ -->
+      <div class="pane" id="pane-batch">
+        <div class="card" style="padding:16px;gap:14px;display:flex;flex-direction:column;">
+          <div class="card-title">📥 Excel Batch Regression</div>
+          <p style="font-size:12px;color:var(--text2);line-height:1.6;">Upload an Excel workbook with a header row containing <code>test_case</code> and <code>golden_name</code>. Optional columns: <code>browser</code>, <code>description</code>.</p>
+          <div style="display:flex;gap:8px;align-items:flex-end">
+            <div style="flex:1"><input id="batch-file" type="file" accept=".xlsx,.xls" /></div>
+            <button class="btn btn-primary btn-sm" onclick="uploadBatch()">⬆ Upload</button>
+          </div>
+          <div id="batch-upload-message" style="font-size:12px;color:var(--text2)"></div>
+        </div>
+        <div class="card" style="padding:16px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <div class="card-title" style="margin:0">Batch Uploads</div>
+            <button class="btn btn-ghost btn-sm" onclick="fetchBatches()">↺ Refresh</button>
+          </div>
+          <div id="batch-list"></div>
+        </div>
       </div>
 
       <!-- ═══════════════════════════ RUN HISTORY ═══════════════════════════ -->
@@ -637,6 +708,8 @@
                 </label>
               </div>
             </div>
+
+
             <div id="explore-error" class="cand-error" style="display:none"></div>
             <div class="row">
               <button class="btn btn-primary" id="explore-run-btn" onclick="runExplore()">🔍 Start Exploration</button>
@@ -720,6 +793,31 @@
           <div id="explore-history-list" style="font-size:12px;color:var(--text2)">Loading…</div>
         </div>
 
+        <!-- GitHub Runner Setup ─────────────────────────────────────────── -->
+        <div class="card">
+          <div class="card-title">⚙️ GitHub Runner Setup
+            <span style="font-size:11px;color:var(--text2);font-weight:400;margin-left:6px">
+              One-click: mirror this container's env vars to GitHub Actions secrets
+            </span>
+          </div>
+
+          <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:12px">
+            When <strong>EXPLORE_MODE=github_runner</strong> is active, explorations run on a GitHub Actions runner.
+            Click below to push all required secrets from this container to your GitHub repository automatically —
+            no local machine or manual steps needed.
+          </div>
+
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" onclick="syncGithubSecrets()">
+              🔑 Sync Secrets to GitHub
+            </button>
+            <span id="secrets-status" style="font-size:12px;color:var(--text2)"></span>
+          </div>
+
+          <div id="secrets-report" style="display:none;margin-top:12px;font-size:12px;font-family:'JetBrains Mono',monospace;
+               background:var(--bg);padding:12px;border-radius:6px;border:1px solid var(--border);line-height:1.7"></div>
+        </div>
+
       </div><!-- /pane-explore -->
 
     </main>
@@ -730,12 +828,14 @@
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
-let STATE = { goldens: [], runs: [], healGoldenId: '', healCode: '',
+let STATE = { goldens: [], runs: [], batches: [], healGoldenId: '', healCode: '',
               exploreId: '', exploreMd: '', exploreCode: '' };
+const BATCH_STREAMS = {};   // batchId → { reader, active }
+const BATCH_CI_POLLS = {};  // batchId → intervalId
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 async function boot() {
-  await Promise.all([fetchGoldens(), fetchRuns()]);
+  await Promise.all([fetchGoldens(), fetchRuns(), fetchBatches()]);
   renderNav();
 }
 
@@ -758,6 +858,10 @@ async function fetchRuns() {
   STATE.runs = await api('GET', '/runs').catch(() => []);
   renderRuns();
 }
+async function fetchBatches() {
+  STATE.batches = await api('GET', '/batch').catch(() => []);
+  renderBatches();
+}
 async function syncAndFetchRuns() {
   // Pull completed GitHub Actions runs into local store, then refresh list
   await api('GET', '/runs/sync-from-github').catch(() => {});
@@ -772,6 +876,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.add('active');
     document.getElementById('pane-' + el.dataset.tab).classList.add('active');
     if (el.dataset.tab === 'heal') populateHealSelects();
+    if (el.dataset.tab === 'batch') fetchBatches();
     if (el.dataset.tab === 'runs') syncAndFetchRuns();
   });
 });
@@ -779,11 +884,522 @@ document.querySelectorAll('.nav-item').forEach(el => {
 function renderNav() {
   document.getElementById('nav-golden-count').textContent = STATE.goldens.length;
   document.getElementById('badge-goldens').textContent = STATE.goldens.length + ' golden' + (STATE.goldens.length !== 1 ? 's' : '');
+  document.getElementById('nav-batch-count').textContent = STATE.batches.length;
   document.getElementById('nav-run-count').textContent = STATE.runs.length;
   const fails = STATE.runs.flatMap(r => (Array.isArray(r.candidates) ? r.candidates : []).filter(c => c.status === 'fail')).length;
   const fb = document.getElementById('nav-fail-count');
   fb.style.display = fails > 0 ? '' : 'none';
   fb.textContent = fails + ' fail' + (fails !== 1 ? 's' : '');
+}
+
+async function uploadBatch() {
+  const fileInput = document.getElementById('batch-file');
+  const file = fileInput?.files?.[0];
+  const message = document.getElementById('batch-upload-message');
+  if (!file) {
+    message.textContent = 'Please choose an Excel file to upload.';
+    return;
+  }
+  message.textContent = 'Uploading batch...';
+
+  const form = new FormData();
+  form.append('file', file);
+
+  try {
+    const response = await fetch('/api/batch/upload', {
+      method: 'POST',
+      body: form,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || response.statusText);
+    }
+    const data = await response.json();
+    message.textContent = `Batch ${data.batchId} created with ${data.rowCount} rows.`;
+    fileInput.value = '';
+    await fetchBatches();
+  } catch (err) {
+    message.textContent = `Upload failed: ${err.message}`;
+  }
+}
+
+async function fetchBatches() {
+  STATE.batches = await api('GET', '/batch').catch(() => []);
+  renderBatches();
+}
+
+// ── Batch status helpers ─────────────────────────────────────────────────────
+
+function getRowStatusInfo(row) {
+  const s  = row.status         || 'pending';
+  const ws = row.workflowStatus || 'pending';
+  const conclusion = (row.result && row.result.conclusion) || '';
+  if (s === 'pending')
+    return { emoji:'⌛', label:'Not started',      cls:'sp-pending', active:false };
+  if (s === 'running' && (ws === 'pending' || !ws))
+    return { emoji:'⚡', label:'Synthesizing',      cls:'sp-synth',   active:true  };
+  if (s === 'ready' && (ws === 'pending' || !ws))
+    return { emoji:'🟢', label:'Golden ready',      cls:'sp-ready',   active:false };
+  if (s === 'queued' || ws === 'queued' || ws === 'waiting')
+    return { emoji:'⏳', label:'Queued',             cls:'sp-queued',  active:true  };
+  if (s === 'running' && (ws === 'in_progress' || ws === 'running'))
+    return { emoji:'🔄', label:'CI running',         cls:'sp-ci',      active:true  };
+  if (s === 'complete' || conclusion === 'success')
+    return { emoji:'✅', label:'CI passed',           cls:'sp-pass',    active:false };
+  if (s === 'cancelled')
+    return { emoji:'🚫', label:'Cancelled',           cls:'sp-cancel',  active:false };
+  if (s === 'failed')
+    return { emoji:'❌', label:(ws === 'pending' ? 'Synthesis failed' : 'CI failed'), cls:'sp-fail', active:false };
+  return { emoji:'⌛', label:s, cls:'sp-pending', active:false };
+}
+
+function getBatchStatusCounts(batch) {
+  const c = { pending:0, synthesizing:0, ready:0, queued:0, ciRunning:0, passed:0, failed:0 };
+  for (const row of (batch.rows || [])) {
+    const { label } = getRowStatusInfo(row);
+    if      (label === 'Not started')  c.pending++;
+    else if (label === 'Synthesizing') c.synthesizing++;
+    else if (label === 'Golden ready') c.ready++;
+    else if (label === 'Queued')       c.queued++;
+    else if (label === 'CI running')   c.ciRunning++;
+    else if (label === 'CI passed')    c.passed++;
+    else if (label.includes('failed')) c.failed++;
+  }
+  return c;
+}
+
+function renderBatchSummaryBar(batch) {
+  const c = getBatchStatusCounts(batch);
+  const parts = [];
+  if (c.pending     > 0) parts.push(`<span class="status-pill sp-pending">⌛ ${c.pending} not started</span>`);
+  if (c.synthesizing> 0) parts.push(`<span class="status-pill sp-synth sp-pulse">⚡ ${c.synthesizing} synthesizing</span>`);
+  if (c.ready       > 0) parts.push(`<span class="status-pill sp-ready">🟢 ${c.ready} goldens ready</span>`);
+  if (c.queued      > 0) parts.push(`<span class="status-pill sp-queued sp-pulse">⏳ ${c.queued} queued</span>`);
+  if (c.ciRunning   > 0) parts.push(`<span class="status-pill sp-ci sp-pulse">🔄 ${c.ciRunning} CI running</span>`);
+  if (c.passed      > 0) parts.push(`<span class="status-pill sp-pass">✅ ${c.passed} passed</span>`);
+  if (c.failed      > 0) parts.push(`<span class="status-pill sp-fail">❌ ${c.failed} failed</span>`);
+  return parts.join('');
+}
+
+function renderBatchRowHTML(row, batchId) {
+  const info   = getRowStatusInfo(row);
+  const active = info.active ? ' sp-pulse' : '';
+  const ciLink = (row.result && row.result.run_url)
+    ? `<a href="${esc(row.result.run_url)}" target="_blank" style="font-size:10px;color:var(--accent);margin-left:8px;text-decoration:none">↗ CI</a>` : '';
+  const errMsg = (info.cls === 'sp-fail' && row.result && row.result.message)
+    ? `<div style="color:#F87171;font-size:10px;margin-top:2px;white-space:normal">${esc(row.result.message.slice(0,90))}…</div>` : '';
+  const cancelBtn = (info.active || row.status === 'pending')
+    ? `<button onclick="cancelBatchRow('${batchId}','${row.rowId}')" title="Cancel this row"
+         style="margin-left:6px;padding:1px 6px;font-size:11px;cursor:pointer;
+                background:none;border:1px solid #FECACA;border-radius:4px;
+                color:#F87171;line-height:1.4" onmouseover="this.style.background='#FEF2F2'" onmouseout="this.style.background='none'">✕</button>` : '';
+  return `<tr id="batch-row-${row.rowId}">
+    <td style="color:var(--text3);font-size:11px;width:36px">${row.rowIndex||''}</td>
+    <td class="tc-cell" title="${esc(row.test_case)}">${esc((row.test_case||'').slice(0,55))}${(row.test_case||'').length>55?'…':''}</td>
+    <td class="gn-cell" title="${esc(row.golden_name)}">${esc(row.golden_name||'')}</td>
+    <td style="font-size:11px;color:var(--text2);width:70px">${esc(row.browser||'msedge')}</td>
+    <td class="row-status-cell" style="width:200px">
+      <span class="status-pill ${info.cls}${active}">${info.emoji} ${info.label}</span>${cancelBtn}${ciLink}${errMsg}
+    </td>
+  </tr>`;
+}
+
+function _batchStatusBadge(status) {
+  return ({
+    pending:    '<span class="status-pill sp-pending">⌛ Pending</span>',
+    running:    '<span class="status-pill sp-synth sp-pulse">⚡ Running</span>',
+    ready:      '<span class="status-pill sp-ready">🟢 Ready</span>',
+    dispatched: '<span class="status-pill sp-ci sp-pulse">🔄 Dispatched to CI</span>',
+    failed:     '<span class="status-pill sp-fail">❌ Failed</span>',
+    cancelled:  '<span class="status-pill sp-cancel">🚫 Cancelled</span>',
+    complete:   '<span class="status-pill sp-pass">✅ Complete</span>',
+  })[status] || `<span class="status-pill sp-pending">${esc(status||'unknown')}</span>`;
+}
+
+function renderBatches() {
+  const el = document.getElementById('batch-list');
+  if (!STATE.batches.length) {
+    el.innerHTML = '<div class="empty">No batch uploads yet.</div>';
+    renderNav();
+    return;
+  }
+
+  // Preserve open state across re-renders
+  const openSet = new Set();
+  document.querySelectorAll('#batch-list .golden-card').forEach(card => {
+    const body = card.querySelector('.golden-body');
+    if (body && body.classList.contains('open')) openSet.add(card.id.replace('batch-card-',''));
+  });
+
+  el.innerHTML = STATE.batches.map(batch => {
+    const rows = batch.rows || [];
+    const total = rows.length;
+    const done  = rows.filter(r => ['complete','failed','cancelled'].includes(r.status)).length;
+    const pct   = total ? Math.round((done/total)*100) : 0;
+    const isActive = ['running','pending','dispatched'].includes(batch.status);
+
+    return `<div class="golden-card" id="batch-card-${batch.id}" style="margin-bottom:12px">
+      <div class="golden-header" onclick="toggleBody(this)">
+        <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">
+          <span style="font-size:18px">📦</span>
+          <div style="min-width:0">
+            <div style="font-family:'JetBrains Mono',monospace;font-weight:600;font-size:13px;color:#111827">${esc(batch.name||batch.id)}</div>
+            <div style="font-size:11px;color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(batch.sourceFileName||'Uploaded batch')}</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+          ${_batchStatusBadge(batch.status)}
+          <span style="font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace">${done}/${total}</span>
+          <span style="color:var(--text2);font-size:12px">▼</span>
+        </div>
+      </div>
+      <div class="golden-body">
+        <!-- Summary pill bar -->
+        <div class="batch-summary" id="batch-summary-${batch.id}">${renderBatchSummaryBar(batch)}</div>
+        <!-- Progress bar -->
+        <div class="batch-mini-prog"><div class="batch-mini-prog-fill" id="batch-prog-${batch.id}" style="width:${pct}%"></div></div>
+        <!-- Row table -->
+        <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+          <div style="max-height:300px;overflow-y:auto">
+            <table class="batch-tbl">
+              <thead><tr>
+                <th style="width:36px">#</th>
+                <th>Test Case</th>
+                <th>Golden Name</th>
+                <th style="width:70px">Browser</th>
+                <th style="width:190px">Status</th>
+              </tr></thead>
+              <tbody id="batch-rows-${batch.id}">${rows.map(r => renderBatchRowHTML(r, batch.id)).join('')}</tbody>
+            </table>
+          </div>
+        </div>
+        <!-- Live log -->
+        <div class="batch-log" id="batch-log-${batch.id}">
+          ${isActive ? '<div class="log-info">Live log — stream will connect shortly…</div>' : ''}
+        </div>
+        <!-- Actions -->
+        <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:12px">
+          ${(batch.status === 'pending' || batch.status === 'failed') ? `
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <label style="font-size:11px;color:var(--text2);margin:0;text-transform:none;letter-spacing:0">Workers:</label>
+              <select id="batch-workers-${batch.id}"
+                style="padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-size:12px;
+                       background:var(--surface);color:var(--text);font-family:'JetBrains Mono',monospace;width:auto">
+                <option value="1">1 — sequential</option>
+                <option value="2" ${(batch.workers||2)==2?'selected':''}>2 — safe default</option>
+                <option value="3" ${(batch.workers||2)==3?'selected':''}>3 — faster</option>
+                <option value="4" ${(batch.workers||2)==4?'selected':''}>4 — max</option>
+              </select>
+              <button class="btn btn-primary btn-sm" onclick="triggerBatch('${batch.id}')">
+                ${batch.status==='failed'?'↺ Retry':'▶ Dispatch &amp; Synthesize'}
+              </button>
+            </div>` : ''}
+          ${batch.status === 'dispatched' ? `<button class="btn btn-ghost btn-sm" onclick="refreshBatchCI('${batch.id}')">🔍 Poll CI Status</button>` : ''}
+          ${isActive                      ? `<button class="btn btn-ghost btn-sm" onclick="cancelBatch('${batch.id}')" style="color:var(--fail-t);border-color:var(--fail-b)">✕ Cancel</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="downloadBatch('${batch.id}')">⬇ Download Results</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Restore open state
+  openSet.forEach(id => {
+    const card = document.getElementById(`batch-card-${id}`);
+    if (card) {
+      const body = card.querySelector('.golden-body');
+      if (body) body.classList.add('open');
+    }
+  });
+
+  // Re-attach streams for active batches
+  for (const batch of STATE.batches) {
+    if (['running','dispatched'].includes(batch.status) && !BATCH_STREAMS[batch.id]) {
+      startBatchStream(batch.id);
+    }
+  }
+
+  renderNav();
+}
+
+async function downloadBatch(batchId) {
+  const response = await fetch(`/api/batch/${batchId}/download`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    showToast(error.detail || 'Download failed', 'error');
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `batch-${batchId}.xlsx`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function refreshBatch(batchId) {
+  try {
+    const response = await fetch(`/api/batch/${batchId}/refresh`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || response.statusText);
+    }
+    const payload = await response.json();
+    showToast(`Batch ${batchId} refreshed (${payload.updatedRows} rows updated)`, 'success');
+    await fetchBatches();
+    return payload;
+  } catch (err) {
+    showToast(`Batch refresh failed: ${err.message}`, 'error');
+  }
+}
+
+async function triggerBatch(batchId) {
+  const workersEl = document.getElementById(`batch-workers-${batchId}`);
+  const workers = workersEl ? parseInt(workersEl.value, 10) : 2;
+  try {
+    const response = await fetch(`/api/batch/${batchId}/trigger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workers }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || response.statusText);
+    }
+    const payload = await response.json();
+    showToast(`Batch ${batchId} — synthesis started (${workers} worker${workers>1?'s':''})`, 'success');
+    // Optimistically update status — renderBatches will start the stream for any running batch
+    const idx = STATE.batches.findIndex(b => b.id === batchId);
+    if (idx >= 0) { STATE.batches[idx].status = 'running'; STATE.batches[idx].workers = workers; }
+    renderBatches();
+    // Open the card so the user can watch live
+    const card = document.getElementById(`batch-card-${batchId}`);
+    if (card) {
+      const body = card.querySelector('.golden-body');
+      if (body && !body.classList.contains('open')) body.classList.add('open');
+    }
+    return payload;
+  } catch (err) {
+    showToast(`Batch dispatch failed: ${err.message}`, 'error');
+  }
+}
+
+async function cancelBatch(batchId) {
+  if (!confirm(`Cancel batch ${batchId}? This will stop any running synthesis and dispatch.`)) {
+    return;
+  }
+  try {
+    const response = await fetch(`/api/batch/${batchId}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || response.statusText);
+    }
+    showToast(`Batch ${batchId} cancelled`, 'warn');
+    await fetchBatches();
+  } catch (err) {
+    showToast(`Cancel failed: ${err.message}`, 'error');
+  }
+}
+
+// ── Batch live stream & per-row status ────────────────────────────────────
+
+function batchLog(batchId, msg, cls = 'log-info') {
+  const el = document.getElementById(`batch-log-${batchId}`);
+  if (!el) return;
+  const t = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement('div');
+  line.className = cls;
+  line.innerHTML = `<span class="log-time">[${t}]</span> ${esc(msg)}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  while (el.children.length > 200) el.removeChild(el.firstChild);
+}
+
+async function startBatchStream(batchId) {
+  stopBatchStream(batchId);
+  batchLog(batchId, 'Connecting to live status stream…', 'log-info');
+  try {
+    const resp = await fetch(`/api/batch/${batchId}/stream`);
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    BATCH_STREAMS[batchId] = { reader, active: true };
+    let buf = '';
+    while (BATCH_STREAMS[batchId]?.active) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try { _handleBatchEvent(batchId, JSON.parse(line.slice(6))); }
+          catch { /* partial JSON */ }
+        }
+      }
+    }
+    batchLog(batchId, 'Stream closed.', 'log-info');
+  } catch (e) {
+    batchLog(batchId, `Stream error: ${e.message}`, 'log-warn');
+  }
+}
+
+function stopBatchStream(batchId) {
+  const s = BATCH_STREAMS[batchId];
+  if (s) { s.active = false; s.reader?.cancel().catch(() => {}); delete BATCH_STREAMS[batchId]; }
+}
+
+function _handleBatchEvent(batchId, event) {
+  const { type } = event;
+
+  if (type === 'snapshot') {
+    const idx = STATE.batches.findIndex(b => b.id === batchId);
+    if (idx >= 0) STATE.batches[idx] = event.batch;
+    _syncBatchSummary(event.batch);
+    _syncBatchProgress(event.batch);
+    const w = event.batch.workers || 1;
+    batchLog(batchId, `Connected — ${event.batch.rowCount} rows, ${w} worker${w>1?'s':''}, status: ${event.batch.status}`, 'log-info');
+
+  } else if (type === 'row_update') {
+    const bidx = STATE.batches.findIndex(b => b.id === batchId);
+    if (bidx >= 0) {
+      const ridx = STATE.batches[bidx].rows.findIndex(r => r.rowId === event.row.rowId);
+      if (ridx >= 0) STATE.batches[bidx].rows[ridx] = event.row;
+      _syncBatchSummary(STATE.batches[bidx]);
+      _syncBatchProgress(STATE.batches[bidx]);
+    }
+    _updateRowDOM(batchId, event.row);
+    const info = getRowStatusInfo(event.row);
+    const lvl = info.cls === 'sp-fail' ? 'log-err' : info.cls === 'sp-pass' ? 'log-ok' : info.active ? 'log-wait' : 'log-info';
+    const detail = (info.cls === 'sp-fail' && event.row.result?.message) ? ` — ${event.row.result.message.slice(0,60)}` : '';
+    batchLog(batchId, `${info.emoji} Row ${event.row.rowIndex||'?'}: ${esc(event.row.golden_name||'')} → ${info.label}${detail}`, lvl);
+
+  } else if (type === 'batch_update') {
+    const bidx = STATE.batches.findIndex(b => b.id === batchId);
+    if (bidx >= 0) STATE.batches[bidx] = event.batch;
+    const lvl = event.status === 'failed' ? 'log-err' : event.status === 'dispatched' ? 'log-ok' : 'log-info';
+    batchLog(batchId, `Batch status → ${event.status}`, lvl);
+    // Update header badge
+    const card = document.getElementById(`batch-card-${batchId}`);
+    if (card) {
+      const badgeSlot = card.querySelector('.golden-header .status-pill');
+      if (badgeSlot) badgeSlot.outerHTML = _batchStatusBadge(event.status);
+    }
+    if (event.status === 'dispatched') {
+      batchLog(batchId, '🚀 Goldens pushed to GitHub — starting CI status polling every 15 s', 'log-ok');
+      _startCIPoll(batchId);
+    }
+    if (['failed','cancelled','complete'].includes(event.status)) {
+      stopBatchStream(batchId);
+      _stopCIPoll(batchId);
+    }
+
+  } else if (type === 'done') {
+    const bidx = STATE.batches.findIndex(b => b.id === batchId);
+    if (bidx >= 0 && event.batch) { STATE.batches[bidx] = event.batch; _syncBatchSummary(event.batch); }
+    batchLog(batchId, '🏁 All rows reached terminal state.', 'log-ok');
+    stopBatchStream(batchId);
+    _stopCIPoll(batchId);
+
+  } else if (type === 'error') {
+    batchLog(batchId, `Error: ${event.message}`, 'log-err');
+  }
+  // heartbeat: no-op
+}
+
+function _updateRowDOM(batchId, row) {
+  const rowEl = document.getElementById(`batch-row-${row.rowId}`);
+  if (!rowEl) return;
+  const info       = getRowStatusInfo(row);
+  const active     = info.active ? ' sp-pulse' : '';
+  const ciLink     = (row.result && row.result.run_url)
+    ? `<a href="${esc(row.result.run_url)}" target="_blank" style="font-size:10px;color:var(--accent);margin-left:8px;text-decoration:none">↗ CI</a>` : '';
+  const errMsg     = (info.cls === 'sp-fail' && row.result && row.result.message)
+    ? `<div style="color:#F87171;font-size:10px;margin-top:2px;white-space:normal">${esc(row.result.message.slice(0,90))}…</div>` : '';
+  const cancelBtn  = (info.active || row.status === 'pending')
+    ? `<button onclick="cancelBatchRow('${batchId}','${row.rowId}')" title="Cancel this row"
+         style="margin-left:6px;padding:1px 6px;font-size:11px;cursor:pointer;
+                background:none;border:1px solid #FECACA;border-radius:4px;
+                color:#F87171;line-height:1.4" onmouseover="this.style.background='#FEF2F2'" onmouseout="this.style.background='none'">✕</button>` : '';
+  const cell = rowEl.querySelector('.row-status-cell');
+  if (cell) cell.innerHTML = `<span class="status-pill ${info.cls}${active}">${info.emoji} ${info.label}</span>${cancelBtn}${ciLink}${errMsg}`;
+}
+
+function _syncBatchSummary(batch) {
+  const el = document.getElementById(`batch-summary-${batch.id}`);
+  if (el) el.innerHTML = renderBatchSummaryBar(batch);
+}
+
+function _syncBatchProgress(batch) {
+  const rows  = batch.rows || [];
+  const total = rows.length;
+  const done  = rows.filter(r => ['complete','failed','cancelled'].includes(r.status)).length;
+  const pct   = total ? Math.round((done / total) * 100) : 0;
+  const el    = document.getElementById(`batch-prog-${batch.id}`);
+  if (el) el.style.width = pct + '%';
+}
+
+function _startCIPoll(batchId) {
+  if (BATCH_CI_POLLS[batchId]) return;
+  BATCH_CI_POLLS[batchId] = setInterval(async () => {
+    try {
+      const payload = await api('POST', `/batch/${batchId}/refresh`);
+      if (payload.updatedRows > 0) {
+        batchLog(batchId, `CI poll: ${payload.updatedRows} row(s) updated from GitHub`, 'log-info');
+      }
+    } catch { /* silent — stream will surface real errors */ }
+  }, 15000);
+}
+
+function _stopCIPoll(batchId) {
+  clearInterval(BATCH_CI_POLLS[batchId]);
+  delete BATCH_CI_POLLS[batchId];
+}
+
+async function refreshBatchCI(batchId) {
+  batchLog(batchId, 'Polling GitHub for CI status…', 'log-info');
+  try {
+    const payload = await api('POST', `/batch/${batchId}/refresh`);
+    showToast(`${payload.updatedRows} row(s) updated`, 'success');
+    batchLog(batchId, `GitHub returned updates for ${payload.updatedRows} row(s)`, 'log-ok');
+  } catch (e) {
+    showToast(`CI refresh failed: ${e.message}`, 'error');
+  }
+}
+
+async function cancelBatchRow(batchId, rowId) {
+  try {
+    const res = await api('POST', `/batch/${batchId}/rows/${rowId}/cancel`);
+    batchLog(batchId, `🚫 Row cancelled: ${rowId}`, 'log-warn');
+    showToast('Row cancelled', 'warn');
+    // DOM update will come via SSE stream; do an optimistic update immediately
+    const rowEl = document.getElementById(`batch-row-${rowId}`);
+    if (rowEl) {
+      const cell = rowEl.querySelector('.row-status-cell');
+      if (cell) cell.innerHTML = `<span class="status-pill sp-cancel">🚫 Cancelled</span>`;
+    }
+    // Sync summary bar
+    const bidx = STATE.batches.findIndex(b => b.id === batchId);
+    if (bidx >= 0) {
+      const ridx = STATE.batches[bidx].rows.findIndex(r => r.rowId === rowId);
+      if (ridx >= 0) {
+        STATE.batches[bidx].rows[ridx].status = 'cancelled';
+        STATE.batches[bidx].rows[ridx].workflowStatus = 'cancelled';
+        _syncBatchSummary(STATE.batches[bidx]);
+        _syncBatchProgress(STATE.batches[bidx]);
+      }
+    }
+  } catch (e) {
+    showToast(`Cancel failed: ${e.message}`, 'error');
+    batchLog(batchId, `Cancel failed: ${e.message}`, 'log-err');
+  }
 }
 
 // ── Synthesize ─────────────────────────────────────────────────────────────
@@ -1405,6 +2021,55 @@ function applyEnrichedDraft() {
   showToast('Enriched description applied — ready to run', 'success');
 }
 
+// ── GitHub Runner Setup ───────────────────────────────────────────────────────
+
+async function syncGithubSecrets() {
+  const statusEl = document.getElementById('secrets-status');
+  const reportEl = document.getElementById('secrets-report');
+  statusEl.textContent = 'Syncing…';
+  statusEl.style.color = 'var(--text2)';
+  reportEl.style.display = 'none';
+
+  try {
+    const res  = await fetch('/api/setup/sync-github-secrets', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+
+    const ghOk  = data.ready;
+    const aca   = data.azure_update || {};
+    const acaOk = aca.updated && aca.updated.length > 0;
+
+    statusEl.textContent = ghOk ? (acaOk ? '✅ GitHub + Azure updated' : '✅ GitHub synced') : '⚠️ Some secrets missing';
+    statusEl.style.color = ghOk ? 'var(--pass-t)' : '#f59e0b';
+
+    let html = '<div style="margin-bottom:6px;font-weight:600;color:var(--text)">GitHub Actions secrets</div>';
+    if (data.set?.length)     html += `<div style="color:var(--pass-t)">✅ Set (${data.set.length}): ${data.set.join(', ')}</div>`;
+    if (data.skipped?.length) html += `<div style="color:var(--text2)">–  Skipped (optional): ${data.skipped.join(', ')}</div>`;
+    if (data.missing?.length) html += `<div style="color:var(--fail-t)">❌ Missing (required): ${data.missing.join(', ')}</div>`;
+
+    html += '<div style="margin:10px 0 6px;font-weight:600;color:var(--text)">Azure Container App env vars</div>';
+    if (acaOk) {
+      html += `<div style="color:var(--pass-t)">✅ Updated: ${aca.updated.join(', ')}</div>`;
+      html += `<div style="color:var(--text2);margin-top:4px">EXPLORE_MODE=github_runner is now active. Explorations will run on GitHub runners.</div>`;
+    } else if (aca.skipped) {
+      html += `<div style="color:#f59e0b">⚠️ ${aca.reason}</div>`;
+      if (data.generated_token) {
+        html += `<div style="margin-top:6px;color:var(--text2)">Set these manually on your Azure Container App:<br>
+          <strong>STUDIO_CALLBACK_TOKEN=${data.generated_token}</strong><br>
+          <strong>EXPLORE_MODE=github_runner</strong><br>
+          <strong>STUDIO_PUBLIC_URL=https://&lt;your-studio&gt;.azurecontainerapps.io</strong></div>`;
+      }
+    }
+
+    reportEl.innerHTML = html;
+    reportEl.style.display = 'block';
+  } catch(e) {
+    statusEl.textContent = `❌ ${e.message}`;
+    statusEl.style.color = 'var(--fail-t)';
+  }
+}
+
+
 async function runExplore() {
   const tc       = document.getElementById('explore-tc').value.trim();
   const auth     = document.getElementById('explore-auth').value.trim() || null;
@@ -1566,8 +2231,6 @@ function resetExplore() {
   document.getElementById('explore-form').style.display = 'block';
   document.getElementById('explore-progress').style.display = 'none';
   document.getElementById('explore-error').style.display = 'none';
-  ['explore-steps-card','explore-md-card','explore-code-card'].forEach(id =>
-    document.getElementById(id).style.display = 'none');
   document.getElementById('explore-path-badge').style.display = 'none';
 }
 
@@ -1582,12 +2245,11 @@ async function loadExplorations() {
     listEl.innerHTML = explorations.map(e => `
       <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
         <div>
-          <span style="font-family:'JetBrains Mono',monospace;color:var(--accent2)">${e.id}</span>
-          <span style="margin-left:8px;color:var(--text2)">${escHtml(e.testCase)}</span>
-          ${e.pathTaken ? `<span style="margin-left:6px;font-size:11px;padding:1px 6px;border-radius:8px;background:#4f46e5;color:#fff">Path ${e.pathTaken}</span>` : ''}
+          <span style="font-family:'JetBrains Mono',monospace;color:var(--accent2)">${escHtml(e.id)}</span>
+          <span style="margin-left:8px;color:var(--text2)">${escHtml(e.testCase || '')}</span>
         </div>
-        <div style="display:flex;gap:6px;align-items:center">
-          <span style="color:var(--text3);font-size:11px">${e.stepsCount} steps</span>
+        <div>
+          <span>📌 ${escHtml(e.status || '')}</span>
           <button class="btn btn-ghost btn-sm" onclick="loadExploration('${e.id}')">Load</button>
         </div>
       </div>
@@ -1630,6 +2292,7 @@ async function loadExploration(id) {
 document.querySelectorAll('.nav-item[data-tab="explore"]').forEach(el =>
   el.addEventListener('click', () => { loadExplorations(); loadSelectorMemory(); })
 );
+
 
 // ── Selector Memory ────────────────────────────────────────────────────────
 

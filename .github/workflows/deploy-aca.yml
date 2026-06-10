@@ -21,6 +21,7 @@ on:
     paths:
       - "studio/**"
       - "deploy/**"
+      - "scripts/**"
   workflow_dispatch:
     inputs:
       force_deploy:
@@ -80,6 +81,25 @@ jobs:
           echo "**URL**: https://$URL" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Image**: \`${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
+
+      # ── 5b. Configure runner-mode env vars on Container App ─────────────────
+      - name: Set runner env vars on Container App
+        run: |
+          FQDN=$(az containerapp show \
+            --name ${{ secrets.ACA_APP_NAME }} \
+            --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          SUB=$(az account show --query id -o tsv)
+
+          az containerapp update \
+            --name ${{ secrets.ACA_APP_NAME }} \
+            --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+            --set-env-vars \
+              "EXPLORE_MODE=github_runner" \
+              "STUDIO_PUBLIC_URL=https://${FQDN}" \
+              "AZURE_SUBSCRIPTION_ID=${SUB}" \
+              "AZURE_RESOURCE_GROUP=${{ secrets.ACA_RESOURCE_GROUP }}" \
+              "AZURE_CONTAINER_APP_NAME=${{ secrets.ACA_APP_NAME }}"
 
       # ── 6. Post-deploy smoke test ────────────────────────────────────────────
       # Waits for the NEW revision to reach Running state (not just the server
