@@ -99,7 +99,11 @@ jobs:
               "GITHUB_TOKEN=${{ secrets.STUDIO_GITHUB_TOKEN }}" \
               "GITHUB_OWNER=rohitshetty84" \
               "GITHUB_REPO=Playwright_V2" \
-              "GITHUB_BRANCH=main"
+              "GITHUB_BRANCH=main" \
+              "AZURE_OPENAI_API_KEY=${{ secrets.AZURE_OPENAI_API_KEY }}" \
+              "AZURE_OPENAI_ENDPOINT=${{ secrets.AZURE_OPENAI_ENDPOINT }}" \
+              "AZURE_OPENAI_API_VERSION=${{ secrets.AZURE_OPENAI_API_VERSION }}" \
+              "AZURE_OPENAI_DEPLOYMENT=${{ secrets.AZURE_OPENAI_DEPLOYMENT }}"
 
           echo "url=https://${FQDN}" >> "$GITHUB_OUTPUT"
           echo "### Deployed" >> $GITHUB_STEP_SUMMARY
