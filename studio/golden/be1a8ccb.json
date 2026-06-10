@@ -1,0 +1,23 @@
+{
+  "id": "be1a8ccb",
+  "name": "Search Functionality \u2013 Basic Regression",
+  "description": "1. Launch browser. 2. Navigate to https://www.amazon.sg. 3. Wait for search input (name=\"field-keywords\"). 4. Enter \"headphones\". 5. Press Enter. 6. Wait for search results to load. 7. Validate at least one result is displayed. 8. Close browser.",
+  "code": "import { test, expect } from '@playwright/test';\n\ntest('Amazon.sg search for headphones and validate results', async ({ page }) => {\n  // 1. Launch browser and navigate to Amazon.sg\n  await page.goto('https://www.amazon.sg');\n\n  // 2. Wait for search input (name=\"field-keywords\")\n  const searchInput = page.locator('input[name=\"field-keywords\"]');\n  await expect(searchInput).toBeVisible();\n\n  // 3. Enter \"headphones\"\n  await searchInput.fill('headphones');\n\n  // 4. Press Enter\n  await searchInput.press('Enter');\n\n  // 5. Wait for search results to load\n  const resultsLocator = page.locator('div.s-main-slot div[data-component-type=\"s-search-result\"]');\n  await expect(resultsLocator.first()).toBeVisible({ timeout: 10000 });\n\n  // 6. Validate at least one result is displayed\n  const resultCount = await resultsLocator.count();\n  expect(resultCount).toBeGreaterThan(0);\n\n  // 7. Close browser (handled automatically by Playwright)\n});",
+  "browsers": [
+    ""
+  ],
+  "analysis": {
+    "phase1Pass": true,
+    "phase1Message": "Test executed successfully",
+    "phase2Updated": false,
+    "phase2Changes": [],
+    "phase3Pass": true,
+    "phase3Message": "Validation passed (no tuning applied)",
+    "recommendation": "\u2705 Ready to save as GOLDEN! All phases passed."
+  },
+  "createdAt": "2026-06-10 14:22",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}

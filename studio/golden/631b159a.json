@@ -1,0 +1,23 @@
+{
+  "id": "631b159a",
+  "name": "Navigation Back Behaviour",
+  "description": "1. Launch browser \u2192 Amazon SG. 2. Search for \"monitor\". 3. Click first product. 4. Click browser back button. 5. Validate search results page is displayed. 6. Close browser.",
+  "code": "import { test, expect } from '@playwright/test';\n\ntest('Amazon SG monitor search and back navigation', async ({ page }) => {\n  // 1. Launch browser \u2192 Amazon SG.\n  await page.goto('https://www.amazon.sg/');\n\n  // 2. Search for \"monitor\".\n  const searchBox = page.locator('input#twotabsearchtextbox');\n  await expect(searchBox).toBeVisible({ timeout: 10000 });\n  await searchBox.fill('monitor');\n  await page.getByRole('button', { name: 'Go' }).click();\n\n  // 3. Click first product.\n  const firstProduct = page.locator('div.s-main-slot div[data-component-type=\"s-search-result\"]').first().locator('h2 a');\n  await expect(firstProduct).toBeVisible({ timeout: 10000 });\n  await firstProduct.click();\n\n  // 4. Click browser back button.\n  await page.goBack();\n\n  // 5. Validate search results page is displayed.\n  // Wait for search results main slot to be visible\n  const searchResults = page.locator('div.s-main-slot');\n  await expect(searchResults).toBeVisible({ timeout: 10000 });\n  // Optionally, check that the search box still contains 'monitor'\n  await expect(searchBox).toHaveValue('monitor');\n\n  // 6. Close browser.\n  // (Playwright test runner handles browser close automatically)\n});",
+  "browsers": [
+    ""
+  ],
+  "analysis": {
+    "phase1Pass": false,
+    "phase1Message": "\\u001b[31mTimed out 10000ms waiting for \\u001b[39m\\u001b[2mexpect(\\u001b[22m\\u001b[31mlocator\\u001b[39m\\u001b[2m).\\u001b[22mtoBeVisible\\u001b[2m()\\u001b[22m\\n\\nLocator: locator('div.s-main-slot div[data-component-type=\\\"s-search-result\\\"]').first().locator('a[href*=\\\"/dp/\\\"]')\\nExpected: visible\\nReceived: <element(s) not found>\\nCall log:\\n  \\u001b[2m- expect.toBeVisible with timeout 10000ms\\u001b[22m\\n\\u001b[2m  - waiting for locator('div.s-main-slot div[data-component-type=\\\"s-search-result\\\"]').first().locator('a[href*=\\\"/dp/\\\"]')\\u001b[22m\\n\",",
+    "phase2Updated": false,
+    "phase2Changes": [],
+    "phase3Pass": false,
+    "phase3Message": "Not run (loop did not pass)",
+    "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+  },
+  "createdAt": "2026-06-10 17:00",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}

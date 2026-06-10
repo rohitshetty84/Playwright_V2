@@ -1,0 +1,23 @@
+{
+  "id": "cc1a8600",
+  "name": "Mini Cart Icon Click",
+  "description": "1. Launch browser \u2192 Amazon SG. 2. Add product to cart. 3. Click cart icon (id=\"nav-cart\"). 4. Validate cart page loads. 5. Close browser.",
+  "code": "import { test, expect } from '@playwright/test';\n\ntest('Amazon SG - Add product to cart and validate cart page', async ({ page }) => {\n  // 1. Launch browser \u2192 Amazon SG.\n  await page.goto('https://www.amazon.sg/', { waitUntil: 'domcontentloaded' });\n\n  // 2. Add product to cart.\n  // Search for a product (e.g., \"laptop\")\n  const searchBox = page.locator('input#twotabsearchtextbox');\n  await expect(searchBox).toBeVisible({ timeout: 10000 });\n  await searchBox.fill('laptop');\n  await page.getByRole('button', { name: 'Go' }).click();\n\n  // Wait for search results to load\n  const firstProduct = page.locator('div.s-main-slot div[data-component-type=\"s-search-result\"]').first();\n  await expect(firstProduct).toBeVisible({ timeout: 15000 });\n\n  // Click the first product link\n  const productLink = firstProduct.locator('h2 a');\n  await productLink.click();\n\n  // Wait for product page to load\n  await expect(page.getByRole('button', { name: /Add to Cart/i })).toBeVisible({ timeout: 15000 });\n\n  // Click \"Add to Cart\"\n  await page.getByRole('button', { name: /Add to Cart/i }).click();\n\n  // Wait for cart confirmation or side sheet\n  const cartConfirmation = page.locator('h1').filter({ hasText: 'Added to Cart' });\n  const cartSideSheet = page.locator('div#attach-added-to-cart-message');\n  await Promise.race([\n    cartConfirmation.waitFor({ timeout: 10000 }).catch(() => {}),\n    cartSideSheet.waitFor({ timeout: 10000 }).catch(() => {}),\n    page.waitForTimeout(3000) // fallback short wait\n  ]);\n\n  // 3. Click cart icon (id=\"nav-cart\").\n  const cartIcon = page.locator('#nav-cart');\n  await expect(cartIcon).toBeVisible({ timeout: 10000 });\n  await cartIcon.click();\n\n  // 4. Validate cart page loads.\n  await expect(page).toHaveURL(/.*\\/gp\\/cart\\/view\\.html.*/);\n  const cartHeader = page.getByText('Shopping Cart', { exact: true });\n  await expect(cartHeader).toBeVisible({ timeout: 10000 });\n\n  // 5. Close browser.\n  // (Playwright test runner handles browser closure automatically)\n});",
+  "browsers": [
+    ""
+  ],
+  "analysis": {
+    "phase1Pass": false,
+    "phase1Message": "expect.toBeVisible: Error: strict mode violation: getByRole('button', { name: /Add to Cart/i }) resolved to 2 elements:\\n    1) <button role=\\\"button\\\" tabindex=\\\"-1\\\" data-modal-ignore=\\\"\\\" data-behavior=\\\"activate\\\" id=\\\"nav-assist-add-to-cart\\\" data-target=\\\"#add-to-cart-button\\\" data-nav-assist-menu-item-index=\\\"12\\\" aria-label=\\\"Add to cart, shift, Alt, K\\\" aria-describedby=\\\"nav-assist-shortcut-help\\\" class=\\\"nav-assistant-menu-item nav-assistant-link-item nav-assistant-keyboard-shortcut-item keyboard-shortcut-menu-container a-color-base a-color-link nav-assistant-link-button\\\" data-actuators=\\\"[{\\\"eventKey\\\":\\\"\uf8ff\\\",\\\"eventCode\\\":\\\"KeyK\\\",\\\"isShiftReq\u2026>\u2026</button> aka getByLabel('Add to cart, shift, Alt, K')\\n    2) <input data-ref=\\\"\\\" type=\\\"submit\\\" value=\\\"Add to cart\\\" class=\\\"a-button-input\\\" id=\\\"add-to-cart-button\\\" name=\\\"submit.add-to-cart\\\" title=\\\"Add to Shopping Cart\\\" aria-labelledby=\\\"submit.add-to-cart-announce\\\" formaction=\\\"/cart/add-to-cart/ref=dp_start-bbf_1_glance\\\" data-hover=\\\"Select <b>__dims__</b> from the left<br> to add to Shopping Cart\\\"/> aka getByLabel('Add to cart', { exact: true })\\n\\nCall log:\\n  \\u001b[2m- expect.toBeVisible with timeout 15000ms\\u001b[22m\\n\\u001b[2m  - waiting for getByRole('button', { name: /Add to Cart/i })\\u001b[22m\\n\",",
+    "phase2Updated": false,
+    "phase2Changes": [],
+    "phase3Pass": false,
+    "phase3Message": "Not run (loop did not pass)",
+    "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+  },
+  "createdAt": "2026-06-10 16:58",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}

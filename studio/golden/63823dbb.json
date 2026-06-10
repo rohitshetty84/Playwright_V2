@@ -1,0 +1,23 @@
+{
+  "id": "63823dbb",
+  "name": "Sort Functionality Regression",
+  "description": "1. Launch browser \u2192 Amazon SG. 2. Search for \"phone\". 3. Select \"Price: Low to High\" sort option. 4. Wait for results refresh. 5. Validate sorting dropdown reflects selected option. 6. Close browser.",
+  "code": "import { test, expect } from '@playwright/test';\n\ntest('Amazon SG - Search phone and sort by Price: Low to High', async ({ page }) => {\n  // 1. Launch browser \u2192 Amazon SG.\n  await page.goto('https://www.amazon.sg/');\n\n  // 2. Search for \"phone\".\n  const searchBox = page.locator('input#twotabsearchtextbox');\n  await expect(searchBox).toBeVisible({ timeout: 10000 });\n  await searchBox.fill('phone');\n  await page.locator('input#nav-search-submit-button').click();\n\n  // 3. Select \"Price: Low to High\" sort option.\n  // Wait for sort dropdown to be visible\n  const sortDropdown = page.locator('span.a-dropdown-container select');\n  await expect(sortDropdown).toBeVisible({ timeout: 10000 });\n  // Select the option\n  await sortDropdown.selectOption({ label: 'Price: Low to High' });\n\n  // 4. Wait for results refresh.\n  // Wait for the URL to reflect the sort, or for results to update\n  await expect(page).toHaveURL(/s=price-asc-rank/, { timeout: 10000 });\n  // Alternatively, wait for a result item to appear\n  const results = page.locator('div.s-main-slot div[data-component-type=\"s-search-result\"]');\n  await expect(results.first()).toBeVisible({ timeout: 10000 });\n\n  // 5. Validate sorting dropdown reflects selected option.\n  await expect(sortDropdown).toHaveValue('price-asc-rank');\n\n  // 6. Close browser.\n  // (Playwright test runner handles browser close automatically)\n});",
+  "browsers": [
+    ""
+  ],
+  "analysis": {
+    "phase1Pass": true,
+    "phase1Message": "Test executed successfully",
+    "phase2Updated": false,
+    "phase2Changes": [],
+    "phase3Pass": true,
+    "phase3Message": "Validation passed (no tuning applied)",
+    "recommendation": "\u2705 Ready to save as GOLDEN! All phases passed."
+  },
+  "createdAt": "2026-06-10 16:57",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}

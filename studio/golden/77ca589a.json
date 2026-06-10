@@ -1,0 +1,23 @@
+{
+  "id": "77ca589a",
+  "name": "Product Image Load Check",
+  "description": "1. Launch browser \u2192 Amazon SG. 2. Search for \"backpack\". 3. Open first product. 4. Validate product image is loaded (img not broken). 5. Close browser.",
+  "code": "import { test, expect } from '@playwright/test';\n\ntest('Amazon SG backpack image loads', async ({ page }) => {\n  // 1. Launch browser \u2192 Amazon SG\n  await page.goto('https://www.amazon.sg/', { waitUntil: 'domcontentloaded' });\n\n  // 2. Search for \"backpack\"\n  const searchBox = page.locator('input[name=\"field-keywords\"]');\n  await expect(searchBox).toBeVisible();\n  await searchBox.fill('backpack');\n  await page.locator('input#nav-search-submit-button').click();\n\n  // 3. Open first product\n  // Wait for search results to load\n  const firstProductLink = page.locator('a[href*=\"/dp/\"]').first();\n  await expect(firstProductLink).toBeVisible({ timeout: 10000 });\n  await firstProductLink.click();\n\n  // 4. Validate product image is loaded (img not broken)\n  // Wait for product image to be visible\n  const productImage = page.locator('img[data-a-dynamic-image]');\n  await expect(productImage).toBeVisible({ timeout: 10000 });\n\n  // Check that the image has loaded and is not broken\n  const imageLoaded = await productImage.evaluate((img: HTMLImageElement) => {\n    return img.complete && img.naturalWidth > 0;\n  });\n  expect(imageLoaded).toBe(true);\n\n  // 5. Close browser (handled automatically by Playwright)\n});",
+  "browsers": [
+    ""
+  ],
+  "analysis": {
+    "phase1Pass": true,
+    "phase1Message": "Test executed successfully",
+    "phase2Updated": false,
+    "phase2Changes": [],
+    "phase3Pass": true,
+    "phase3Message": "Validation passed (no tuning applied)",
+    "recommendation": "\u2705 Ready to save as GOLDEN! All phases passed."
+  },
+  "createdAt": "2026-06-10 16:56",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}
