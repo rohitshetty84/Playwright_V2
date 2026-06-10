@@ -73,30 +73,12 @@ jobs:
             --file deploy/Dockerfile \
             .
 
-      # ── 4. Deploy to Container App ───────────────────────────────────────────
-      - name: Deploy to Azure Container Apps
-        uses: azure/container-apps-deploy-action@v2
-        with:
-          resourceGroup: ${{ secrets.ACA_RESOURCE_GROUP }}
-          containerAppName: ${{ secrets.ACA_APP_NAME }}
-          imageToDeploy: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
-
-      # ── 5. Get app URL ───────────────────────────────────────────────────────
-      - name: Get app URL
+      # ── 4. Deploy new image + set all env vars in one revision ─────────────────
+      # Using az containerapp update directly so image + env vars land in a single
+      # revision — avoids a second revision that would restart the container and
+      # cause the smoke test to hit a partially-configured instance.
+      - name: Deploy image + configure env vars
         id: app_url
-        run: |
-          URL=$(az containerapp show \
-            --name ${{ secrets.ACA_APP_NAME }} \
-            --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
-            --query "properties.configuration.ingress.fqdn" -o tsv)
-          echo "url=https://$URL" >> "$GITHUB_OUTPUT"
-          echo "### Deployed" >> $GITHUB_STEP_SUMMARY
-          echo "**URL**: https://$URL" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image**: \`${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
-
-      # ── 5b. Configure runner-mode env vars on Container App ─────────────────
-      - name: Set runner env vars on Container App
         run: |
           FQDN=$(az containerapp show \
             --name ${{ secrets.ACA_APP_NAME }} \
@@ -107,12 +89,18 @@ jobs:
           az containerapp update \
             --name ${{ secrets.ACA_APP_NAME }} \
             --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+            --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest \
             --set-env-vars \
               "EXPLORE_MODE=github_runner" \
               "STUDIO_PUBLIC_URL=https://${FQDN}" \
               "AZURE_SUBSCRIPTION_ID=${SUB}" \
               "AZURE_RESOURCE_GROUP=${{ secrets.ACA_RESOURCE_GROUP }}" \
               "AZURE_CONTAINER_APP_NAME=${{ secrets.ACA_APP_NAME }}"
+
+          echo "url=https://${FQDN}" >> "$GITHUB_OUTPUT"
+          echo "### Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "**URL**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image**: \`${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
 
       # ── 6. Post-deploy smoke test ────────────────────────────────────────────
       # Waits for the NEW revision to reach Running state (not just the server
