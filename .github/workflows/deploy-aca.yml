@@ -95,7 +95,11 @@ jobs:
               "STUDIO_PUBLIC_URL=https://${FQDN}" \
               "AZURE_SUBSCRIPTION_ID=${SUB}" \
               "AZURE_RESOURCE_GROUP=${{ secrets.ACA_RESOURCE_GROUP }}" \
-              "AZURE_CONTAINER_APP_NAME=${{ secrets.ACA_APP_NAME }}"
+              "AZURE_CONTAINER_APP_NAME=${{ secrets.ACA_APP_NAME }}" \
+              "GITHUB_TOKEN=${{ secrets.STUDIO_GITHUB_TOKEN }}" \
+              "GITHUB_OWNER=rohitshetty84" \
+              "GITHUB_REPO=Playwright_V2" \
+              "GITHUB_BRANCH=main"
 
           echo "url=https://${FQDN}" >> "$GITHUB_OUTPUT"
           echo "### Deployed" >> $GITHUB_STEP_SUMMARY

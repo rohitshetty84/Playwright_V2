@@ -1,66 +1,28 @@
 """
 scripts/smoke_deploy.py
 =======================
-Post-deploy smoke test for the Browser Explorer running on Azure Container Apps
-(or any hosted instance).  Uses a public website — no auth session required.
+Post-deploy smoke test for the Playwright AI Studio on Azure Container Apps.
 
-The test is intentionally minimal: it validates the complete path from
-HTTP API → LLM → MCP bridge → browser launch → step execution.  If ANY layer
-is broken the test fails, which is all we need to gate a deployment.
+Checks that the app is running and key APIs respond correctly.
+Does NOT trigger a real exploration (that dispatches to GitHub Actions and
+is too heavy / has side-effects for a deploy gate).
 
-Exit codes
-----------
-  0  — all assertions passed
-  1  — one or more assertions failed (or server unreachable)
+Exit codes:
+  0 — all checks passed
+  1 — one or more checks failed
 
-Usage
------
-    # Against the deployed Azure app (reads STUDIO_URL env var or defaults):
+Usage:
     python scripts/smoke_deploy.py
-
-    # Explicit URL:
     python scripts/smoke_deploy.py --url https://ca-playwright-studio.victoriousglacier-a63c9b2a.eastus.azurecontainerapps.io
-
-    # Local server (for parity testing):
-    python scripts/smoke_deploy.py --url http://localhost:8000
-
-    # CI — exits 1 on failure, prints no extra prompts:
     python scripts/smoke_deploy.py --ci
-
-Requirements
-------------
-    pip install httpx
 """
 
 import argparse
 import json
 import os
 import sys
-import time
-from typing import Iterator, Optional
 
 import httpx
-
-# ── Smoke test case — public site, no auth ────────────────────────────────────
-# Deliberately simple: navigate → read title → done.
-# Success proves: browser launched, MCP bridge live, LLM responded, step ran.
-TEST_CASE = """
-1. Launch browser.
-2. Navigate to https://www.amazon.sg.
-3. Wait for input[name="field-keywords"] to be visible.
-4. Fill input[name="field-keywords"] with "Magic Tree House Boxed Set".
-5. Press Enter key in input[name="field-keywords"] to submit the search.
-""".strip()
-
-# ── Acceptance thresholds ─────────────────────────────────────────────────────
-MIN_STEPS_EXECUTED = 2        # at least 2 steps must run (launch + navigate proves browser works)
-MIN_SUCCESS_RATE   = 0.40     # 40% — steps 1-3 passing is enough to confirm the stack
-MAX_STEPS          = 10       # cap so the smoke test stays fast
-TIMEOUT_SECONDS    = 240      # 4 min — Amazon can be slow to load
-
-# Keyword that must appear in at least one successful step description —
-# confirms we actually navigated somewhere rather than erroring on launch.
-MUST_PASS_KEYWORD  = "navigate"
 
 DEFAULT_URL = os.environ.get(
     "STUDIO_URL",
@@ -68,141 +30,66 @@ DEFAULT_URL = os.environ.get(
 )
 
 
-# ── SSE streaming ─────────────────────────────────────────────────────────────
-
-def stream_sse(url: str, timeout: int) -> Iterator[dict]:
-    with httpx.stream("GET", url, timeout=timeout) as resp:
-        resp.raise_for_status()
-        buf = ""
-        for chunk in resp.iter_text():
-            buf += chunk
-            while "\n\n" in buf:
-                block, buf = buf.split("\n\n", 1)
-                for line in block.splitlines():
-                    if line.startswith("data:"):
-                        payload = line[5:].strip()
-                        if payload:
-                            try:
-                                yield json.loads(payload)
-                            except json.JSONDecodeError:
-                                pass
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def run(base_url: str, ci: bool) -> bool:
     SEP = "─" * 64
     print(f"\n{SEP}")
-    print("  Browser Explorer — Deploy Smoke Test")
+    print("  Playwright AI Studio — Deploy Smoke Test")
     print(f"  Target : {base_url}")
-    print(f"  Steps  : {MAX_STEPS}   Timeout: {TIMEOUT_SECONDS}s")
     print(SEP)
 
     failures: list[str] = []
 
-    # ── 1. Server reachable ───────────────────────────────────────────────────
-    print("\n[1/4] Health check…")
-    try:
+    def check(label: str, fn):
+        try:
+            fn()
+            print(f"  ✅  {label}")
+        except Exception as e:
+            print(f"  ❌  {label}: {e}")
+            failures.append(f"{label}: {e}")
+
+    # ── 1. Health (serves the UI) ────────────────────────────────────────────
+    def health():
         r = httpx.get(f"{base_url}/", timeout=30)
         r.raise_for_status()
-        print("  ✅ Server reachable")
-    except Exception as e:
-        _fail(f"Server not reachable: {e}", ci)
-        return False
+        assert "text/html" in r.headers.get("content-type", ""), \
+            f"Expected HTML, got {r.headers.get('content-type')}"
 
-    # ── 2. Start exploration (no storage_state → no auth needed) ─────────────
-    print("\n[2/4] Starting exploration…")
-    try:
-        r = httpx.post(
-            f"{base_url}/api/explore/start",
-            json={
-                "test_case":  TEST_CASE,
-                "max_steps":  MAX_STEPS,
-                "headless":   True,
-            },
-            timeout=30,
-        )
+    check("GET / returns HTML", health)
+
+    # ── 2. Explorations list ─────────────────────────────────────────────────
+    def explorations():
+        r = httpx.get(f"{base_url}/api/explorations", timeout=15)
         r.raise_for_status()
-        eid = r.json()["explorationId"]
-        print(f"  ✅ Exploration started — ID: {eid}")
-    except Exception as e:
-        _fail(f"Failed to start exploration: {e}", ci)
-        return False
+        data = r.json()
+        assert isinstance(data, (list, dict)), f"Unexpected response shape: {data!r:.100}"
 
-    # ── 3. Stream events ──────────────────────────────────────────────────────
-    print("\n[3/4] Streaming events…")
-    stream_url = f"{base_url}/api/explorations/{eid}/stream"
+    check("GET /api/explorations responds", explorations)
 
-    steps: list[dict] = []
-    fatal: Optional[str] = None
-    start_t = time.time()
+    # ── 3. Selector memory endpoint ──────────────────────────────────────────
+    def selector_memory():
+        r = httpx.get(f"{base_url}/api/selector-memory", timeout=15)
+        r.raise_for_status()
 
-    try:
-        for event in stream_sse(stream_url, timeout=TIMEOUT_SECONDS):
-            etype = event.get("type", "")
+    check("GET /api/selector-memory responds", selector_memory)
 
-            if etype == "log":
-                msg = event.get("message", "")
-                lvl = event.get("level", "info")
-                icon = "  💥" if lvl == "error" else ("  ⚠️ " if lvl == "warn" else "     ")
-                print(f"{icon} {msg}")
-                if lvl == "error" and any(w in msg.lower() for w in ("fatal", "not installed", "not found", "chromium")):
-                    fatal = msg
+    # ── 4. Memory export (runner uses this) ──────────────────────────────────
+    def memory_export():
+        r = httpx.get(f"{base_url}/api/memory/export", timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        assert "selector_memory" in data, f"Missing selector_memory key: {list(data)}"
 
-            elif etype == "step_result":
-                steps.append(event)
-                icon = "  ✅" if event.get("success") else "  ❌"
-                num  = event.get("step_num", "?")
-                desc = (event.get("description") or "")[:60]
-                print(f"{icon} Step {num}: {desc}")
+    check("GET /api/memory/export responds", memory_export)
 
-            elif etype in ("complete", "done", "error"):
-                break
+    # ── 5. GitHub health (explore/start would fail without this) ────────────
+    def github_health():
+        r = httpx.get(f"{base_url}/api/health/github", timeout=15)
+        assert r.status_code != 404, "Endpoint not found (404)"
+        data = r.json()
+        assert r.status_code == 200 and data.get("status") == "healthy", \
+            f"GitHub not healthy: {r.status_code} {data}"
 
-            if time.time() - start_t > TIMEOUT_SECONDS:
-                failures.append(f"Timed out after {TIMEOUT_SECONDS}s")
-                break
-
-    except Exception as e:
-        failures.append(f"Stream error: {e}")
-
-    elapsed = time.time() - start_t
-    print(f"\n  Elapsed: {elapsed:.1f}s")
-
-    # ── 4. Assertions ─────────────────────────────────────────────────────────
-    print(f"\n[4/4] Assertions…")
-
-    if fatal:
-        failures.append(f"Fatal infrastructure error: {fatal}")
-
-    executed  = [s for s in steps if s.get("action") not in ("blocked", "", None)]
-    succeeded = [s for s in executed if s.get("success")]
-
-    print(f"  Steps planned  : {len(steps)}")
-    print(f"  Steps executed : {len(executed)}")
-    print(f"  Steps passed   : {len(succeeded)}")
-
-    if len(executed) < MIN_STEPS_EXECUTED:
-        failures.append(
-            f"Too few steps executed ({len(executed)} < {MIN_STEPS_EXECUTED}) — "
-            "browser may have failed to launch"
-        )
-
-    if executed:
-        rate = len(succeeded) / len(executed)
-        print(f"  Success rate   : {rate:.0%}  (min {MIN_SUCCESS_RATE:.0%})")
-        if rate < MIN_SUCCESS_RATE:
-            failures.append(f"Success rate {rate:.0%} below threshold {MIN_SUCCESS_RATE:.0%}")
-
-    nav_passed = any(
-        MUST_PASS_KEYWORD in (s.get("description") or "").lower() and s.get("success")
-        for s in steps
-    )
-    if not nav_passed:
-        failures.append(
-            f"No step containing '{MUST_PASS_KEYWORD}' succeeded — "
-            "browser launched but could not navigate"
-        )
+    check("GET /api/health/github — GitHub credentials present", github_health)
 
     # ── Result ────────────────────────────────────────────────────────────────
     print(f"\n{SEP}")
@@ -220,21 +107,10 @@ def run(base_url: str, ci: bool) -> bool:
         return False
 
 
-def _fail(msg: str, ci: bool):
-    print(f"\n  ❌  {msg}")
-    if ci:
-        sys.exit(1)
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Post-deploy smoke test")
-    parser.add_argument("--url", default=DEFAULT_URL,
-                        help="Studio base URL (default: STUDIO_URL env or Azure ACA URL)")
-    parser.add_argument("--ci",  action="store_true",
-                        help="Exit 1 on failure (for CI pipelines)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", default=DEFAULT_URL)
+    parser.add_argument("--ci", action="store_true")
     args = parser.parse_args()
-
     ok = run(base_url=args.url.rstrip("/"), ci=args.ci)
     sys.exit(0 if ok else 1)
