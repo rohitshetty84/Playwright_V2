@@ -66,7 +66,6 @@ jobs:
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           az acr build \
-            --no-cache \
             --registry $(echo "${{ secrets.ACR_LOGIN_SERVER }}" | cut -d. -f1) \
             --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
             --image ${{ env.IMAGE_NAME }}:latest \
