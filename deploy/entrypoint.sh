@@ -47,8 +47,9 @@ if [ -d "$PERSISTENT" ] && mountpoint -q "$PERSISTENT" 2>/dev/null; then
     fi
 
     # ── Ensure all persistent dirs exist on volume (handles dirs added after first boot) ──
+    # Use || true so a permission error on the file share never crashes the container
     for dir in "${PERSISTENT_DIRS[@]}"; do
-        mkdir -p "$PERSISTENT/$dir"
+        mkdir -p "$PERSISTENT/$dir" 2>/dev/null || true
     done
 
     # ── Symlink mutable dirs/files → persistent volume ────────────────────────
