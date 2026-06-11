@@ -119,30 +119,41 @@ jobs:
         run: |
           pip install httpx --quiet
 
-          # Step A: wait for the latest revision to be provisioned (up to 3 min).
-          # Accept both "Running" (replicas active) and "ScaledToZero" (healthy,
-          # no traffic yet) — both mean the revision deployed successfully.
-          # "Provisioning" / "Deprovisioning" / empty = still rolling out.
-          echo "Waiting for new revision to be provisioned…"
-          for i in $(seq 1 18); do
+          # Step A: wait for the NEW revision (by name) to be provisioned (up to 3 min).
+          # Capture the expected revision name right after containerapp update so we
+          # don't accidentally watch an old revision that's already Running.
+          EXPECTED_REV=$(az containerapp revision list \
+            --name ${{ secrets.ACA_APP_NAME }} \
+            --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+            --query "[0].name" -o tsv 2>/dev/null)
+          echo "Waiting for revision $EXPECTED_REV to be provisioned…"
+          for i in $(seq 1 30); do
+            REV_STATE=$(az containerapp revision show \
+              --name ${{ secrets.ACA_APP_NAME }} \
+              --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
+              --revision "$EXPECTED_REV" \
+              --query "properties.runningState" -o tsv 2>/dev/null)
+            echo "  attempt $i: revision=$EXPECTED_REV state=$REV_STATE"
+            if [ "$REV_STATE" = "Running" ] || [ "$REV_STATE" = "ScaledToZero" ]; then
+              echo "Revision is ready (state=$REV_STATE)."
+              break
+            elif [ "$REV_STATE" = "Failed" ]; then
+              echo "ERROR: Revision $EXPECTED_REV failed to start — aborting."
+              exit 1
+            fi
+            # New revision may not be listed yet — re-check the latest
             LATEST_REV=$(az containerapp revision list \
               --name ${{ secrets.ACA_APP_NAME }} \
               --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
               --query "[0].name" -o tsv 2>/dev/null)
-            REV_STATE=$(az containerapp revision show \
-              --name ${{ secrets.ACA_APP_NAME }} \
-              --resource-group ${{ secrets.ACA_RESOURCE_GROUP }} \
-              --revision "$LATEST_REV" \
-              --query "properties.runningState" -o tsv 2>/dev/null)
-            echo "  attempt $i: revision=$LATEST_REV state=$REV_STATE"
-            if [ "$REV_STATE" = "Running" ] || [ "$REV_STATE" = "ScaledToZero" ]; then
-              echo "Revision is ready (state=$REV_STATE)."
-              break
+            if [ "$LATEST_REV" != "$EXPECTED_REV" ]; then
+              echo "  New revision appeared: $LATEST_REV — switching to watch it"
+              EXPECTED_REV="$LATEST_REV"
             fi
             sleep 10
           done
 
-          # Step B: wait for the server to respond on the new revision (up to 2 min)
+          # Step B: wait for the server to respond (up to 2 min)
           echo "Waiting for server to respond…"
           for i in $(seq 1 24); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.app_url.outputs.url }}/")
@@ -151,7 +162,19 @@ jobs:
             sleep 5
           done
 
-          # Step C: extra buffer — let the new container fully stabilise
+          # Step C: verify the NEW index.html was actually deployed (not a stale cached build).
+          # If this fails the deploy silently served old code — treat as a hard failure.
+          echo "Verifying deployed index.html contains expected code…"
+          INDEX_HTML=$(curl -s "${{ steps.app_url.outputs.url }}/")
+          if echo "$INDEX_HTML" | grep -qF "api('GET', '/batch/')"; then
+            echo "✓ index.html verified: fetchBatches uses trailing slash"
+          else
+            echo "✗ DEPLOY VERIFICATION FAILED: index.html still has old code (no trailing slash)"
+            echo "  This means ACR served a cached image or ACA is routing to an old revision."
+            exit 1
+          fi
+
+          # Step D: extra buffer — let the new container fully stabilise
           echo "Letting container stabilise (30s)…"
           sleep 30
 
