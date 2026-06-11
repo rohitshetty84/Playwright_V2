@@ -16,7 +16,7 @@ PERSISTENT="/mnt/studio-data"
 STUDIO="/app/studio"
 
 # Dirs and files that must survive container restarts
-PERSISTENT_DIRS=("golden" ".auth" "explorations" "logs" "runs" "healing_history")
+PERSISTENT_DIRS=("golden" ".auth" "explorations" "logs" "runs" "healing_history" "batches")
 PERSISTENT_FILES=("selector_memory.json" "exploration_patterns.json" "learned_rules.json")
 
 if [ -d "$PERSISTENT" ] && mountpoint -q "$PERSISTENT" 2>/dev/null; then
