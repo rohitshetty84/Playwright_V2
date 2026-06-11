@@ -644,6 +644,19 @@
           </div>
 
           <div id="explore-form" class="col">
+
+            <!-- ── Demo samples ──────────────────────────────────────────────── -->
+            <div>
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+                <span style="font-size:11px;color:var(--text2);font-weight:600;white-space:nowrap">Try a demo →</span>
+                <button class="btn btn-ghost btn-sm" onclick="loadSample(0)" title="Amazon product search">🛒 Amazon Search</button>
+                <button class="btn btn-ghost btn-sm" onclick="loadSample(1)" title="Booking.com hotel search">🏨 Hotel Booking</button>
+                <button class="btn btn-ghost btn-sm" onclick="loadSample(2)" title="GitHub trending repositories">🐙 GitHub Trending</button>
+                <button class="btn btn-ghost btn-sm" onclick="loadSample(3)" title="YouTube video search">▶ YouTube Search</button>
+                <button class="btn btn-ghost btn-sm" onclick="loadSample(4)" title="Wikipedia research cross-link">📖 Wikipedia Research</button>
+              </div>
+            </div>
+
             <div>
               <label>Test Case Description *</label>
               <textarea id="explore-tc" rows="6"
@@ -832,6 +845,109 @@ let STATE = { goldens: [], runs: [], batches: [], healGoldenId: '', healCode: ''
               exploreId: '', exploreMd: '', exploreCode: '' };
 const BATCH_STREAMS = {};   // batchId → { reader, active }
 const BATCH_CI_POLLS = {};  // batchId → intervalId
+
+// ── Demo samples ──────────────────────────────────────────────────────────
+const DEMO_SAMPLES = [
+  {
+    label: 'Amazon Search',
+    appContext: 'Generic web application',
+    auth: '',
+    maxSteps: 20,
+    tc: `1. Launch browser and navigate to https://www.amazon.sg
+2. Wait for the search box (input[name="field-keywords"]) to be visible.
+3. Fill the search box with "Magic Tree House Boxed Set".
+4. Press Enter to submit the search.
+5. Wait for search results to load and for the first product link (.s-search-results .s-result-item h2 a) to be visible.
+6. Click the first product in the search results.
+7. Wait for the product detail page to load and for the product title (id="productTitle") to be visible.
+8. Capture the product title text.
+9. Verify the price and "Add to Cart" or "Buy Now" button are present on the page.`
+  },
+  {
+    label: 'Hotel Booking',
+    appContext: 'Generic web application',
+    auth: '',
+    maxSteps: 25,
+    tc: `1. Launch browser and navigate to https://www.booking.com
+2. Wait for the main search box to be visible.
+3. Click on the destination input field and type "Singapore".
+4. Wait for the autocomplete dropdown to appear and click the first "Singapore" suggestion.
+5. Click the search / check availability button.
+6. Wait for hotel listing results to load.
+7. Capture the name and price of the first hotel result.
+8. Click on the first hotel listing to open the detail page.
+9. Wait for the hotel detail page to load.
+10. Verify the hotel name, star rating, and review score are visible.
+11. Capture the displayed room price.`
+  },
+  {
+    label: 'GitHub Trending',
+    appContext: 'Generic web application',
+    auth: '',
+    maxSteps: 20,
+    tc: `1. Launch browser and navigate to https://github.com/trending
+2. Wait for the trending repositories list to be visible.
+3. Capture the repository name, language, and star count for the top 3 entries.
+4. Click on the first (top-ranked) repository link.
+5. Wait for the repository homepage to load.
+6. Capture the repository description and total star count.
+7. Click the "Issues" tab.
+8. Wait for the issues list to load.
+9. Capture the number of open issues displayed.
+10. Navigate back to https://github.com/trending?spoken_language_code=&since=weekly to see the weekly trending list.
+11. Capture the top result from the weekly view.`
+  },
+  {
+    label: 'YouTube Search',
+    appContext: 'Generic web application',
+    auth: '',
+    maxSteps: 20,
+    tc: `1. Launch browser and navigate to https://www.youtube.com
+2. Wait for the search input to be visible.
+3. Click the search box and type "Playwright browser automation tutorial".
+4. Press Enter to submit the search.
+5. Wait for the search results page to load and video cards to appear.
+6. Capture the title and channel name of the first three video results.
+7. Click on the first video result.
+8. Wait for the video watch page to load and the video player to be visible.
+9. Capture the video title (h1.ytd-watch-metadata) and the view count.
+10. Verify the description section is present below the video.`
+  },
+  {
+    label: 'Wikipedia Research',
+    appContext: 'Generic web application',
+    auth: '',
+    maxSteps: 25,
+    tc: `1. Launch browser and navigate to https://en.wikipedia.org
+2. Wait for the search box to be visible.
+3. Type "Selenium (software)" in the search box and press Enter.
+4. Wait for the article page to load.
+5. Capture the opening paragraph (the first <p> inside #mw-content-text).
+6. Scroll down and look for a hyperlink to "Playwright" or "Playwright (software)" in the article body.
+7. If the link exists, click it. If not, navigate directly to https://en.wikipedia.org/wiki/Playwright_(software).
+8. Wait for the Playwright article to load.
+9. Capture the first paragraph describing what Playwright is.
+10. Verify the article contains a section about "Features" or "Testing".
+11. Capture the names of the browsers listed as supported by Playwright.`
+  }
+];
+
+function loadSample(index) {
+  const s = DEMO_SAMPLES[index];
+  if (!s) return;
+  document.getElementById('explore-tc').value = s.tc;
+  const ctxSelect = document.getElementById('explore-app-context-select');
+  // find the matching option, fall back to Generic
+  let matched = false;
+  for (const opt of ctxSelect.options) {
+    if (opt.value === s.appContext) { ctxSelect.value = s.appContext; matched = true; break; }
+  }
+  if (!matched) ctxSelect.value = 'Generic web application';
+  onAppContextChange(ctxSelect);
+  document.getElementById('explore-auth').value = s.auth;
+  document.getElementById('explore-max-steps').value = s.maxSteps;
+  document.getElementById('explore-tc').focus();
+}
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 async function boot() {
