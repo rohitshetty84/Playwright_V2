@@ -135,7 +135,7 @@ jobs:
       - name: Generate HTML report + POST to Studio
         if: always()
         env:
-          STUDIO_PUBLIC_URL: ${{ secrets.STUDIO_PUBLIC_URL }}
+          STUDIO_PUBLIC_URL: ${{ vars.STUDIO_PUBLIC_URL }}
         run: |
           # Resolve golden name from its JSON file (fall back to golden ID)
           GOLDEN_NAME=$(python3 -c "

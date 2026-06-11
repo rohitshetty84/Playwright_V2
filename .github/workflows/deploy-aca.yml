@@ -110,6 +110,19 @@ jobs:
           echo "**URL**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
           echo "**Image**: \`${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
 
+      # ── 5. Sync STUDIO_PUBLIC_URL → GitHub Actions variable ────────────────
+      # Playwright workflow reads vars.STUDIO_PUBLIC_URL to POST reports back
+      # to Studio. The gh CLI uses STUDIO_GITHUB_TOKEN (needs actions:write).
+      - name: Sync STUDIO_PUBLIC_URL to GitHub Actions variables
+        env:
+          GH_TOKEN: ${{ secrets.STUDIO_GITHUB_TOKEN }}
+        run: |
+          URL="${{ steps.app_url.outputs.url }}"
+          gh variable set STUDIO_PUBLIC_URL \
+            --body "$URL" \
+            --repo "${{ github.repository }}"
+          echo "✓ Set STUDIO_PUBLIC_URL=$URL"
+
       # ── 6. Post-deploy smoke test ────────────────────────────────────────────
       # Waits for the NEW revision to reach Running state (not just the server
       # to respond — the old revision might still be answering requests during
