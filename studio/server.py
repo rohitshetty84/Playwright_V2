@@ -1069,7 +1069,8 @@ def _generate_exploration_md(exploration_id: str, test_case: str, steps_log: lis
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return FileResponse(BASE / "static" / "index.html")
+    return FileResponse(BASE / "static" / "index.html",
+                        headers={"Cache-Control": "no-store"})
 
 @app.get("/api/goldens")
 async def get_goldens():
