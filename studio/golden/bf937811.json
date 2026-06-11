@@ -1,0 +1,23 @@
+{
+  "id": "bf937811",
+  "name": "Product Image Load Check",
+  "description": "1. Launch browser \u2192 Amazon SG. 2. Search for \"backpack\". 3. Open first product. 4. Validate product image is loaded (img not broken). 5. Close browser.",
+  "code": "import { test, expect } from '@playwright/test';\n\ntest('Amazon SG backpack image loads', async ({ page }) => {\n  // 1. Launch browser \u2192 Amazon SG\n  await page.goto('https://www.amazon.sg/', { waitUntil: 'domcontentloaded' });\n\n  // 2. Search for \"backpack\"\n  const searchBox = page.locator('input[name=\"field-keywords\"]');\n  await expect(searchBox).toBeVisible();\n  await searchBox.fill('backpack');\n  await page.getByRole('button', { name: 'Go' }).click();\n\n  // Wait for search results to load\n  const firstProduct = page.locator('div.s-main-slot div[data-component-type=\"s-search-result\"]').first();\n  await expect(firstProduct).toBeVisible();\n\n  // 3. Open first product\n  const productLink = firstProduct.locator('a[href*=\"/dp/\"]');\n  await expect(productLink).toBeVisible();\n  await productLink.click();\n\n  // Wait for product page to load\n  await page.waitForLoadState('domcontentloaded');\n\n  // 4. Validate product image is loaded (img not broken)\n  // Amazon product image: id=\"landingImage\"\n  const productImg = page.locator('img#landingImage');\n  await expect(productImg).toBeVisible();\n\n  // Check image is loaded and not broken\n  const imgLoaded = await productImg.evaluate((img: HTMLImageElement) => {\n    return img && img.complete && img.naturalWidth > 0;\n  });\n  expect(imgLoaded).toBe(true);\n\n  // 5. Close browser (handled automatically by Playwright)\n});",
+  "browsers": [
+    ""
+  ],
+  "analysis": {
+    "phase1Pass": false,
+    "phase1Message": "validate-test.js not found at /app/validate-test.js",
+    "phase2Updated": false,
+    "phase2Changes": [],
+    "phase3Pass": false,
+    "phase3Message": "Not run (loop did not pass)",
+    "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+  },
+  "createdAt": "2026-06-11 04:46",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}
