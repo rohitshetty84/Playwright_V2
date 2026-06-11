@@ -859,7 +859,7 @@ async function fetchRuns() {
   renderRuns();
 }
 async function fetchBatches() {
-  STATE.batches = await api('GET', '/batch').catch(() => []);
+  STATE.batches = await api('GET', '/batch/').catch(() => []);
   renderBatches();
 }
 async function syncAndFetchRuns() {
@@ -921,11 +921,6 @@ async function uploadBatch() {
   } catch (err) {
     message.textContent = `Upload failed: ${err.message}`;
   }
-}
-
-async function fetchBatches() {
-  STATE.batches = await api('GET', '/batch').catch(() => []);
-  renderBatches();
 }
 
 // ── Batch status helpers ─────────────────────────────────────────────────────
