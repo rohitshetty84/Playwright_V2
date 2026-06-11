@@ -797,40 +797,6 @@
           <div id="selector-memory-list" style="font-size:12px;color:var(--text2)">Loading…</div>
         </div>
 
-        <!-- Past explorations -->
-        <div class="card" style="margin-top:8px">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-            <div class="card-title" style="margin:0">Past Explorations</div>
-            <button class="btn btn-ghost btn-sm" onclick="loadExplorations()">↺ Refresh</button>
-          </div>
-          <div id="explore-history-list" style="font-size:12px;color:var(--text2)">Loading…</div>
-        </div>
-
-        <!-- GitHub Runner Setup ─────────────────────────────────────────── -->
-        <div class="card">
-          <div class="card-title">⚙️ GitHub Runner Setup
-            <span style="font-size:11px;color:var(--text2);font-weight:400;margin-left:6px">
-              One-click: mirror this container's env vars to GitHub Actions secrets
-            </span>
-          </div>
-
-          <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:12px">
-            When <strong>EXPLORE_MODE=github_runner</strong> is active, explorations run on a GitHub Actions runner.
-            Click below to push all required secrets from this container to your GitHub repository automatically —
-            no local machine or manual steps needed.
-          </div>
-
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <button class="btn btn-primary btn-sm" onclick="syncGithubSecrets()">
-              🔑 Sync Secrets to GitHub
-            </button>
-            <span id="secrets-status" style="font-size:12px;color:var(--text2)"></span>
-          </div>
-
-          <div id="secrets-report" style="display:none;margin-top:12px;font-size:12px;font-family:'JetBrains Mono',monospace;
-               background:var(--bg);padding:12px;border-radius:6px;border:1px solid var(--border);line-height:1.7"></div>
-        </div>
-
       </div><!-- /pane-explore -->
 
     </main>
