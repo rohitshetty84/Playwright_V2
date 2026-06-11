@@ -46,6 +46,11 @@ if [ -d "$PERSISTENT" ] && mountpoint -q "$PERSISTENT" 2>/dev/null; then
         echo "[entrypoint] Persistent storage initialised"
     fi
 
+    # ── Ensure all persistent dirs exist on volume (handles dirs added after first boot) ──
+    for dir in "${PERSISTENT_DIRS[@]}"; do
+        mkdir -p "$PERSISTENT/$dir"
+    done
+
     # ── Symlink mutable dirs/files → persistent volume ────────────────────────
     for dir in "${PERSISTENT_DIRS[@]}"; do
         rm -rf "$STUDIO/$dir"
