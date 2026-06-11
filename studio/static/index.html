@@ -1535,6 +1535,7 @@ function renderRuns() {
     const ov = fail > 0 ? 'fail' : 'pass';
     const isGH = !!r.githubRunId;
     const ghLink = r.githubRunUrl ? `<a href="${esc(r.githubRunUrl)}" target="_blank" style="font-size:10px;color:var(--accent);text-decoration:none;margin-left:8px">↗ GitHub #${r.githubRunNum||''}</a>` : '';
+    const reportBtn = r.hasReport ? `<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:3px 8px" onclick="event.stopPropagation();window.open('/api/runs/${r.id}/report','_blank')">📋 Report</button>` : '';
     const name = r.goldenName && r.goldenName !== 'Unknown' ? r.goldenName : (isGH ? 'CI Run' : '—');
     return `
     <div class="run-card" style="margin-bottom:8px">
@@ -1546,7 +1547,8 @@ function renderRuns() {
             ${ghLink}
           </div>
         </div>
-        <div class="row" style="gap:10px;flex-shrink:0;font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace">
+        <div class="row" style="gap:8px;flex-shrink:0;font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace">
+          ${reportBtn}
           <span>${r.runAt}</span>
           ${isGH ? '<span style="color:var(--text3)">GitHub Actions</span>' : `<span>🌐 ${r.browser}</span>`}
           <span style="color:var(--text2)">▼</span>

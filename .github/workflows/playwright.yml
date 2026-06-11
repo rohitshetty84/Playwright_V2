@@ -132,6 +132,32 @@ jobs:
         run: npx playwright test --reporter=json,html,list
         continue-on-error: true
 
+      - name: Generate HTML report + POST to Studio
+        if: always()
+        env:
+          STUDIO_PUBLIC_URL: ${{ secrets.STUDIO_PUBLIC_URL }}
+        run: |
+          # Resolve golden name from its JSON file (fall back to golden ID)
+          GOLDEN_NAME=$(python3 -c "
+          import json, sys
+          try:
+            d = json.load(open('studio/golden/${{ matrix.golden }}.json'))
+            print(d.get('name', '${{ matrix.golden }}'))
+          except Exception:
+            print('${{ matrix.golden }}')
+          " 2>/dev/null || echo "${{ matrix.golden }}")
+
+          python3 scripts/generate_report.py \
+            --results results.json \
+            --test-results-dir test-results \
+            --golden-id   "${{ matrix.golden }}" \
+            --golden-name "$GOLDEN_NAME" \
+            --github-run-id  "${{ github.run_id }}" \
+            --github-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --github-run-num "${{ github.run_number }}" \
+            --output report.html \
+            ${STUDIO_PUBLIC_URL:+--studio-url "$STUDIO_PUBLIC_URL"}
+
       - name: Upload artifacts (per golden)
         if: always()
         uses: actions/upload-artifact@v4
@@ -142,6 +168,7 @@ jobs:
             playwright-report/
             test-results/
             results.json
+            report.html
           retention-days: 30
 
       - name: Publish per-golden summary

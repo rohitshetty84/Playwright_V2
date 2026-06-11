@@ -2127,6 +2127,59 @@ async def sync_runs_from_github():
     return {"imported": imported, "message": f"Imported {imported} new run(s) from GitHub Actions"}
 
 
+# ─ Receive report HTML from CI runner ────────────────────────────────────────
+class RunReportRequest(BaseModel):
+    golden_id:      str
+    golden_name:    str = ""
+    github_run_id:  str = ""
+    github_run_url: str = ""
+    github_run_num: str = ""
+    browser:        str = "chromium"
+    candidates:     list[dict] = []
+    report_html:    str = ""
+
+@app.post("/api/runs/report")
+async def receive_run_report(req: RunReportRequest):
+    # Find existing run by github_run_id, or create one
+    existing = next(
+        (r for r in load_runs() if r.get("githubRunId") == req.github_run_id and req.github_run_id),
+        None
+    )
+
+    if existing:
+        rid = existing["id"]
+        existing["hasReport"] = bool(req.report_html)
+        save_json(RUNS_DIR, rid, existing)
+    else:
+        rid = str(uuid.uuid4())[:8]
+        run = {
+            "id":           rid,
+            "goldenId":     req.golden_id,
+            "goldenName":   req.golden_name or req.golden_id,
+            "browser":      req.browser,
+            "runAt":        ts_now(),
+            "githubRunId":  req.github_run_id,
+            "githubRunUrl": req.github_run_url,
+            "githubRunNum": req.github_run_num,
+            "hasReport":    bool(req.report_html),
+            "candidates":   req.candidates,
+        }
+        save_json(RUNS_DIR, rid, run)
+
+    if req.report_html:
+        (RUNS_DIR / f"{rid}_report.html").write_text(req.report_html, encoding="utf-8")
+
+    return {"run_id": rid, "has_report": bool(req.report_html)}
+
+@app.get("/api/runs/{run_id}/report")
+async def get_run_report(run_id: str):
+    report_path = RUNS_DIR / f"{run_id}_report.html"
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="Report not found for this run")
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=report_path.read_text(encoding="utf-8"),
+                        headers={"Cache-Control": "no-store"})
+
 # ─ Record a test run ──────────────────────────────────────────────────────────
 @app.post("/api/runs")
 async def record_run(req: RunRequest):
