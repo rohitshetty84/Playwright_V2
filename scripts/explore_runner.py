@@ -183,4 +183,14 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    # Run and then drain the loop so asyncio subprocess transports (the MCP server
+    # child process) have a chance to close cleanly before the GC tears them down.
+    # Without this Python 3.11 prints "RuntimeError: Event loop is closed" in __del__,
+    # which GitHub Actions wrongly flags as a step error even though the job passed.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run())
+        loop.run_until_complete(asyncio.sleep(0.1))  # drain pending callbacks
+    finally:
+        loop.close()
