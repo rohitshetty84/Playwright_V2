@@ -5291,13 +5291,82 @@ Return ONLY the numbered step list. No introduction, no summary."""
         raise HTTPException(status_code=500, detail=f"Enrichment failed: {e}")
 
 
+async def _poll_github_run(exploration_id: str, queue: asyncio.Queue, dispatch_time: float) -> None:
+    """
+    Background task: polls GitHub Actions every 30s to find the run triggered for
+    this exploration and stream status updates into the SSE queue.
+    Stops when the queue is removed (runner callback arrived) or after 30 min.
+    """
+    try:
+        gh_token, gh_owner, gh_repo, _wf, _br = get_github_config()
+    except Exception:
+        return
+
+    headers = {
+        "Authorization": f"token {gh_token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    runs_url = f"https://api.github.com/repos/{gh_owner}/{gh_repo}/actions/workflows/explore.yml/runs"
+    run_html_url: str = ""
+    run_id: str = ""
+
+    deadline = dispatch_time + 1800  # 30 min hard limit
+
+    # Give GitHub a few seconds to register the new run
+    await asyncio.sleep(8)
+
+    import time as _time
+
+    while _time.time() < deadline:
+        if _explore_queues.get(exploration_id) is None:
+            return  # runner already posted result
+
+        try:
+            resp = requests.get(runs_url, headers=headers, params={"per_page": 10}, timeout=10)
+            if resp.status_code == 200:
+                for run in resp.json().get("workflow_runs", []):
+                    # Match by creation time — runs dispatched in last 5 minutes
+                    created_ts = run.get("created_at", "")
+                    try:
+                        import datetime as _dt
+                        created = _dt.datetime.fromisoformat(created_ts.replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        created = 0
+                    if created >= dispatch_time - 5:
+                        if not run_html_url:
+                            run_html_url = run.get("html_url", "")
+                            run_id = str(run.get("id", ""))
+                            await _emit(queue, "log", level="info",
+                                        message=f"🏃 Running on GitHub Actions — [view run]({run_html_url})")
+                        status     = run.get("status", "")
+                        conclusion = run.get("conclusion") or ""
+                        label = {
+                            "queued":      "⏳ Queued on runner…",
+                            "in_progress": "⚙️  Running steps on GitHub runner…",
+                            "completed":   f"✅ Runner finished ({conclusion})" if conclusion == "success" else f"⚠️  Runner finished ({conclusion})",
+                        }.get(status, f"Status: {status}")
+                        await _emit(queue, "log", level="info", message=label)
+                        break
+        except Exception:
+            pass
+
+        await asyncio.sleep(30)
+
+    # Timed out — emit a warning so the SSE stream doesn't just hang silently
+    if _explore_queues.get(exploration_id) is not None:
+        await _emit(queue, "log", level="warn",
+                    message="⏱️  GitHub runner is taking longer than expected. Results will appear when the run completes.")
+
+
 @app.post("/api/explore/start")
 async def explore_start(req: ExploreRequest):
     """
     Start an exploration by dispatching to a GitHub Actions runner.
     Returns immediately; the runner POSTs results back via /api/explorations/{id}/complete.
-    The SSE stream receives a 'complete' event when the runner finishes.
+    The SSE stream receives heartbeats + GitHub run status until the runner calls back.
     """
+    import time as _time
+
     exploration_id = str(uuid.uuid4())[:8]
     studio_url     = os.getenv("STUDIO_PUBLIC_URL", "").strip()
 
@@ -5319,7 +5388,16 @@ async def explore_start(req: ExploreRequest):
         max_steps      = req.max_steps,
         headless       = req.headless,
     )
+    dispatch_time = _time.time()
     logger.info(f"[explore/start] Dispatched to GitHub runner — {exploration_id}")
+
+    # Emit an immediate status event so the UI shows something right away
+    await queue.put({"type": "log", "level": "info",
+                     "message": "🚀 Exploration dispatched to GitHub Actions runner. Waiting for it to start…"})
+
+    # Background task: poll GitHub for run URL + status updates
+    asyncio.create_task(_poll_github_run(exploration_id, queue, dispatch_time))
+
     return {
         "explorationId": exploration_id,
         "mode":          "github_runner",
@@ -5345,15 +5423,28 @@ async def stream_exploration(exploration_id: str):
         raise HTTPException(status_code=404, detail="Exploration not found")
 
     async def _generate():
+        # Use short-poll (20s) so we can send SSE heartbeat comments between events.
+        # Heartbeat comments (": ping\n\n") keep the TCP connection alive through
+        # Azure Container Apps' 240s idle timeout and browser keepalive limits.
+        # GitHub runner explorations can take 5-15 min, so we loop for up to 30 min.
+        import time as _time
+        deadline = _time.time() + 1800  # 30 min hard limit
         try:
-            while True:
-                event = await asyncio.wait_for(queue.get(), timeout=120)
-                if event is None:
-                    yield "data: {\"type\":\"done\"}\n\n"
-                    break
-                yield f"data: {json.dumps(event, default=str)}\n\n"
-        except asyncio.TimeoutError:
-            yield "data: {\"type\":\"timeout\",\"message\":\"No activity for 120s\"}\n\n"
+            while _time.time() < deadline:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=20)
+                    if event is None:
+                        yield "data: {\"type\":\"done\"}\n\n"
+                        return
+                    yield f"data: {json.dumps(event, default=str)}\n\n"
+                    if event.get("type") in ("complete", "error", "done"):
+                        return
+                except asyncio.TimeoutError:
+                    # Send SSE comment heartbeat — keeps proxy/browser connection open
+                    yield ": ping\n\n"
+        except Exception:
+            pass
+        yield "data: {\"type\":\"timeout\",\"message\":\"Runner did not respond within 30 minutes\"}\n\n"
 
     return StreamingResponse(
         _generate(),

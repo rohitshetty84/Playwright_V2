@@ -1872,6 +1872,8 @@ function liveLog(msg, level='info') {
   // Highlight keywords for scannability
   const time = `<span style="color:#484f58">[${new Date().toLocaleTimeString()}]</span> `;
   line.innerHTML = time + msg
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
+             '<a href="$2" target="_blank" rel="noopener" style="color:#58a6ff">$1</a>')
     .replace(/✅/g, '<span style="color:#3fb950">✅</span>')
     .replace(/❌/g, '<span style="color:#f85149">❌</span>')
     .replace(/🔄/g, '<span style="color:#ffa657">🔄</span>')
@@ -2124,6 +2126,7 @@ async function runExplore() {
       const lines = buf.split('\n');
       buf = lines.pop(); // keep incomplete last line
       for (const line of lines) {
+        if (line.startsWith(':')) continue; // SSE heartbeat comment — ignore
         if (line.startsWith('data: ')) {
           try {
             const event = JSON.parse(line.slice(6));
