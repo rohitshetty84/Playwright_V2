@@ -5962,6 +5962,20 @@ class RunnerCompletePayload(BaseModel):
     # Any extra fields from _run_exploration result are captured via __fields_set__
 
 
+@app.post("/api/explorations/{exploration_id}/event")
+async def runner_event(exploration_id: str, payload: dict, x_callback_token: str = ""):
+    """
+    Called by explore_runner.py for each live SSE event during an exploration.
+    Forwards the event into the in-memory queue so the browser's SSE stream
+    receives real-time step updates as they happen on the GitHub runner.
+    """
+    _verify_callback(x_callback_token)
+    queue = _explore_queues.get(exploration_id)
+    if queue is not None:
+        await queue.put(payload)
+    return {"ok": True}
+
+
 @app.post("/api/explorations/{exploration_id}/complete")
 async def runner_complete(exploration_id: str, payload: dict, x_callback_token: str = ""):
     """

@@ -119,6 +119,37 @@ def upload_memory() -> None:
         log.warning(f"[memory] Upload failed: {exc}")
 
 
+class RemoteQueue:
+    """
+    Drop-in replacement for asyncio.Queue in the exploration pipeline.
+    Instead of storing events locally, each put() POSTs the event to the
+    Studio's /api/explorations/{id}/event endpoint so the browser's SSE
+    stream receives live step updates as they happen on the runner.
+    """
+
+    def __init__(self, studio_url: str, exploration_id: str, callback_token: str):
+        self._url = f"{studio_url}/api/explorations/{exploration_id}/event"
+        self._headers = {
+            "X-Callback-Token": callback_token,
+            "Content-Type": "application/json",
+        }
+
+    async def put(self, event) -> None:
+        if event is None:
+            return  # end-of-stream sentinel — the /complete callback handles teardown
+        import httpx
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    self._url,
+                    json=event,
+                    headers=self._headers,
+                    timeout=6.0,
+                )
+        except Exception as exc:
+            log.debug(f"[event] Failed to stream event to Studio: {exc}")
+
+
 def post_result(result: dict) -> None:
     """Send the completed exploration result to Studio."""
     log.info(f"[result] Posting to Studio … steps={len(result.get('steps', []))}")
@@ -161,10 +192,11 @@ async def run() -> None:
         max_restarts=0,
     )
 
-    # 4. Run — queue=None means no SSE streaming; result contains all step data
-    log.info("[runner] Starting exploration …")
+    # 4. Run — RemoteQueue streams each event back to Studio in real-time
+    log.info("[runner] Starting exploration (live events → Studio) …")
+    live_queue = RemoteQueue(STUDIO_URL, EXPLORATION_ID, CALLBACK_TOKEN)
     try:
-        result = await _run_exploration(req, EXPLORATION_ID, queue=None)
+        result = await _run_exploration(req, EXPLORATION_ID, queue=live_queue)
         log.info(f"[runner] Exploration finished — {len(result.get('steps', []))} steps")
     except Exception as exc:
         log.exception("[runner] Exploration raised an exception")
