@@ -1,0 +1,23 @@
+{
+  "id": "fa297f32",
+  "name": "Invalid Search Handling",
+  "description": "1. Launch browser \u2192 Amazon SG. 2. Search for \"asdasd123!@#\". 3. Wait for results page. 4. Validate \"no results\" or limited results message appears. 5. Close browser.",
+  "code": "import { test, expect } from '@playwright/test';\n\ntest('Amazon SG - Search for gibberish returns no results or limited results message', async ({ page }) => {\n  // 1. Launch browser \u2192 Amazon SG.\n  await page.goto('https://www.amazon.sg/');\n\n  // 2. Search for \"asdasd123!@#\".\n  const searchBox = page.getByRole('searchbox', { name: /search/i });\n  await expect(searchBox).toBeVisible({ timeout: 10000 });\n  await searchBox.fill('asdasd123!@#');\n  await page.getByRole('button', { name: /search/i }).click();\n\n  // 3. Wait for results page.\n  await expect(page).toHaveURL(/k=asdasd123!@#/i, { timeout: 15000 });\n\n  // 4. Validate \"no results\" or limited results message appears.\n  // Amazon SG may show either a \"No results for\" message or \"did not match any products\" or similar.\n  // We'll check for common no-results selectors/texts.\n  const noResultsLocators = [\n    page.getByText('No results for', { exact: false }),\n    page.getByText('did not match any products', { exact: false }),\n    page.getByText('No results found.', { exact: false }),\n    page.getByText('Your search', { exact: false }).and(page.getByText('did not match any products', { exact: false })),\n    page.getByText('We could not find any results for', { exact: false }),\n    page.getByText('Try checking your spelling or use more general terms', { exact: false }),\n  ];\n\n  let found = false;\n  for (const locator of noResultsLocators) {\n    try {\n      if (await locator.first().isVisible({ timeout: 5000 })) {\n        found = true;\n        break;\n      }\n    } catch (e) {\n      // Continue to next locator\n    }\n  }\n\n  expect(found).toBeTruthy();\n\n  // 5. Close browser.\n  // (Playwright test runner handles browser closure automatically)\n});",
+  "browsers": [
+    ""
+  ],
+  "analysis": {
+    "phase1Pass": false,
+    "phase1Message": "validate-test.js not found at /app/validate-test.js",
+    "phase2Updated": false,
+    "phase2Changes": [],
+    "phase3Pass": false,
+    "phase3Message": "Not run (loop did not pass)",
+    "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+  },
+  "createdAt": "2026-06-11 04:46",
+  "healCount": 0,
+  "lastHealed": null,
+  "status": "active",
+  "steps": 5
+}
