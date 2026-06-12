@@ -1,0 +1,138 @@
+{
+  "id": "7caa0358",
+  "name": "Batch 7caa0358",
+  "sourceFileName": "batch_template.xlsx",
+  "status": "running",
+  "createdAt": "2026-06-10T08:45:43.568064Z",
+  "updatedAt": "2026-06-10T08:50:50.512651Z",
+  "rowCount": 8,
+  "rows": [
+    {
+      "test_case": "1. Launch browser. 2. Navigate to https://www.amazon.sg. 3. Wait for search input (name=\"field-keywords\"). 4. Enter \"headphones\". 5. Press Enter. 6. Wait for search results to load. 7. Validate at least one result is displayed. 8. Close browser.",
+      "golden_name": "Search Functionality \u2013 Basic Regression",
+      "browser": "",
+      "status": "cancelled",
+      "workflowStatus": "cancelled",
+      "result": {
+        "message": "Cancelled by user",
+        "conclusion": "cancelled"
+      },
+      "rowIndex": 2,
+      "rowId": "4634cc67"
+    },
+    {
+      "test_case": "1. Launch browser and navigate to Amazon SG. 2. Search for \"laptop stand\". 3. Click on first product. 4. Wait for product title (id=\"productTitle\"). 5. Validate product title is visible. 6. Close browser.",
+      "golden_name": "Search Result Click Navigation",
+      "browser": "",
+      "status": "cancelled",
+      "workflowStatus": "cancelled",
+      "result": {
+        "message": "Cancelled by user",
+        "conclusion": "cancelled"
+      },
+      "rowIndex": 3,
+      "rowId": "59d27b2d"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Search for \"asdasd123!@#\". 3. Wait for results page. 4. Validate \"no results\" or limited results message appears. 5. Close browser.",
+      "golden_name": "Invalid Search Handling",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 3: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 16:47",
+        "analysis": {
+          "phase1Pass": false,
+          "phase1Message": "\\u001b[31mTimed out 15000ms waiting for \\u001b[39m\\u001b[2mexpect(\\u001b[22m\\u001b[31mlocator\\u001b[39m\\u001b[2m).\\u001b[22mtoHaveURL\\u001b[2m(\\u001b[22m\\u001b[32mexpected\\u001b[39m\\u001b[2m)\\u001b[22m\\n\\nLocator: locator(':root')\\nExpected pattern: \\u001b[32m/k=asdasd123!@#/\\u001b[39m\\nReceived string:  \\u001b[31m\\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[39m\\nCall log:\\n  \\u001b[2m- expect.toHaveURL with timeout 15000ms\\u001b[22m\\n\\u001b[2m  - waiting for locator(':root')\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s/ref=nb_sb_noss?url=search-alias%3Daps&field-keywords=asdasd123%21%40%23\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s/ref=nb_sb_noss?url=search-alias%3Daps&field-keywords=asdasd123%21%40%23\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s/ref=nb_sb_noss?url=search-alias%3Daps&field-keywords=asdasd123%21%40%23\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to <html lang=\\\"en-sg\\\" data-19ax5a9jf=\\\"dingo\\\" data-aui-build-date=\\\"3.26.5-2026-06-03\\\" class=\\\"a-ws a-js a-audio a-video a-canvas a-svg a-drag-drop a-geolocation a-history a-webworker a-autofocus a-input-placeholder a-textarea-placeholder a-local-storage a-gradients a-transform3d a-touch-scrolling a-text-shadow a-text-stroke a-box-shadow a-border-radius a-border-image a-opacity a-transform a-transition a-ember-modern a-ember a-ember-1-0-0 a-ember-modern-display a-ember-modern-display-1-0-0 a-ember-modern-\u2026>\u2026</html>\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"https://www.amazon.sg/s?k=asdasd123%21%40%23&ref=nb_sb_noss\\\"\\u001b[22m\\n\",",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": false,
+          "phase3Message": "Not run (loop did not pass)",
+          "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+        }
+      },
+      "rowIndex": 4,
+      "rowId": "5aecc451",
+      "golden_id": "9bed34f0"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Search for \"phone\". 3. Select \"Price: Low to High\" sort option. 4. Wait for results refresh. 5. Validate sorting dropdown reflects selected option. 6. Close browser.",
+      "golden_name": "Sort Functionality Regression",
+      "browser": "",
+      "status": "cancelled",
+      "workflowStatus": "cancelled",
+      "result": {
+        "message": "Cancelled by user",
+        "conclusion": "cancelled"
+      },
+      "rowIndex": 5,
+      "rowId": "61662ac7"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Search for \"backpack\". 3. Open first product. 4. Validate product image is loaded (img not broken). 5. Close browser.",
+      "golden_name": "Product Image Load Check",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 3: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 16:48",
+        "analysis": {
+          "phase1Pass": false,
+          "phase1Message": "\\u001b[31mTimed out 15000ms waiting for \\u001b[39m\\u001b[2mexpect(\\u001b[22m\\u001b[31mlocator\\u001b[39m\\u001b[2m).\\u001b[22mtoBeVisible\\u001b[2m()\\u001b[22m\\n\\nLocator: locator('div.s-main-slot div[data-component-type=\\\"s-search-result\\\"]').first().locator('h2 a.a-link-normal')\\nExpected: visible\\nReceived: <element(s) not found>\\nCall log:\\n  \\u001b[2m- expect.toBeVisible with timeout 15000ms\\u001b[22m\\n\\u001b[2m  - waiting for locator('div.s-main-slot div[data-component-type=\\\"s-search-result\\\"]').first().locator('h2 a.a-link-normal')\\u001b[22m\\n\",",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": false,
+          "phase3Message": "Not run (loop did not pass)",
+          "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+        }
+      },
+      "rowIndex": 6,
+      "rowId": "20c6bc17",
+      "golden_id": "a09855e3"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Search for \"monitor\". 3. Click first product. 4. Click browser back button. 5. Validate search results page is displayed. 6. Close browser.",
+      "golden_name": "Navigation Back Behaviour",
+      "browser": "",
+      "status": "cancelled",
+      "workflowStatus": "cancelled",
+      "result": {
+        "message": "Cancelled by user",
+        "conclusion": "cancelled"
+      },
+      "rowIndex": 7,
+      "rowId": "38af4d15"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Add product to cart. 3. Click cart icon (id=\"nav-cart\"). 4. Validate cart page loads. 5. Close browser.",
+      "golden_name": "Mini Cart Icon Click",
+      "browser": "",
+      "status": "cancelled",
+      "workflowStatus": "cancelled",
+      "result": {
+        "message": "Cancelled by user",
+        "conclusion": "cancelled"
+      },
+      "rowIndex": 8,
+      "rowId": "636042ad"
+    },
+    {
+      "test_case": "1. Launch browser.\n2. Navigate to https://www.amazon.sg.\n3. Wait for input[name=\"field-keywords\"] to be visible.\n4. Fill input[name=\"field-keywords\"] with \"Magic Tree House Boxed Set\".\n5. Press Enter key in input[name=\"field-keywords\"] to submit the search.\n6. Wait for search results to load and for the first product link (e.g., .s-search-results .s-result-item h2 a) to be visible.\n7. Click on the first product link in the search results.\n8. Wait for the product detail page to load and for the product title (id=\"productTitle\") to be visible.\n9. Read the text content of the product title element (id=\"productTitle\").\n10. Read the text content of the product price element (e.g., id=\"priceblock_ourprice\" or id=\"priceblock_dealprice\" or .a-price .a-offscreen).\n11. Parse the price value as a number.\n12. Validate that the price value is less than 25.\n13. If validation passes, click the \"Add to Cart\" button (id=\"add-to-cart-button\").\n14. Wait for either a cart confirmation message (e.g., #huc-v2-order-row-confirm-text) to appear OR for the cart count element (id=\"nav-cart-count\") to update and increase by 1.\n15. Close the browser.",
+      "golden_name": "Amazon SG search and add to cart with price guard",
+      "browser": "",
+      "status": "cancelled",
+      "workflowStatus": "cancelled",
+      "result": {
+        "message": "Cancelled by user",
+        "conclusion": "cancelled"
+      },
+      "rowIndex": 9,
+      "rowId": "861ebc44"
+    }
+  ],
+  "workers": 3
+}

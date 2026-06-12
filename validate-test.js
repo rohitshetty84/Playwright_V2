@@ -79,18 +79,15 @@ try {
   // Run playwright test
   const args = ['playwright', 'test', tempTestName, '--reporter=json'];
 
-  // Set up environment to show browser during local validation
   const env = Object.assign({}, process.env);
-  env.LOCAL_VALIDATION = 'true'; // Enable headless=false in config
-
-  console.log('[validate] Running with LOCAL_VALIDATION=true (browser will be visible)');
+  delete env.LOCAL_VALIDATION; // ensure headless=true (never open a browser window)
 
   execFile('npx', args,
     {
       timeout: 65000,
       cwd: projectRoot,
       maxBuffer: 10 * 1024 * 1024,
-      env: env  // Pass environment with LOCAL_VALIDATION flag
+      env: env,
     },
     (error, stdout, stderr) => {
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);

@@ -1,0 +1,205 @@
+{
+  "id": "352db8c3",
+  "name": "Batch 352db8c3",
+  "sourceFileName": "batch_template.xlsx",
+  "status": "failed",
+  "createdAt": "2026-06-10T08:49:16.597537Z",
+  "updatedAt": "2026-06-10T09:01:33.265513Z",
+  "rowCount": 8,
+  "rows": [
+    {
+      "test_case": "1. Launch browser. 2. Navigate to https://www.amazon.sg. 3. Wait for search input (name=\"field-keywords\"). 4. Enter \"headphones\". 5. Press Enter. 6. Wait for search results to load. 7. Validate at least one result is displayed. 8. Close browser.",
+      "golden_name": "Search Functionality \u2013 Basic Regression",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 1: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 16:55",
+        "analysis": {
+          "phase1Pass": false,
+          "phase1Message": "\\u001b[31mTimed out 15000ms waiting for \\u001b[39m\\u001b[2mexpect(\\u001b[22m\\u001b[31mlocator\\u001b[39m\\u001b[2m).\\u001b[22mtoHaveCount\\u001b[2m(\\u001b[22m\\u001b[32mexpected\\u001b[39m\\u001b[2m)\\u001b[22m\\n\\nLocator: locator('div.s-main-slot div[data-component-type=\\\"s-search-result\\\"]')\\nExpected: \\u001b[32m1\\u001b[39m\\nReceived: \\u001b[31m60\\u001b[39m\\nCall log:\\n  \\u001b[2m- expect.toHaveCount with timeout 15000ms\\u001b[22m\\n\\u001b[2m  - waiting for locator('div.s-main-slot div[data-component-type=\\\"s-search-result\\\"]')\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\\u001b[2m  -   locator resolved to 60 elements\\u001b[22m\\n\\u001b[2m  -   unexpected value \\\"60\\\"\\u001b[22m\\n\",",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": false,
+          "phase3Message": "Not run (loop did not pass)",
+          "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+        }
+      },
+      "rowIndex": 2,
+      "rowId": "d5b73a62",
+      "golden_id": "061d7328"
+    },
+    {
+      "test_case": "1. Launch browser and navigate to Amazon SG. 2. Search for \"laptop stand\". 3. Click on first product. 4. Wait for product title (id=\"productTitle\"). 5. Validate product title is visible. 6. Close browser.",
+      "golden_name": "Search Result Click Navigation",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 2: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 16:51",
+        "analysis": {
+          "phase1Pass": true,
+          "phase1Message": "Test executed successfully",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": true,
+          "phase3Message": "Validation passed (no tuning applied)",
+          "recommendation": "\u2705 Ready to save as GOLDEN! All phases passed."
+        }
+      },
+      "rowIndex": 3,
+      "rowId": "a02ad9e1",
+      "golden_id": "d58281ff"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Search for \"asdasd123!@#\". 3. Wait for results page. 4. Validate \"no results\" or limited results message appears. 5. Close browser.",
+      "golden_name": "Invalid Search Handling",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 2: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 16:53",
+        "analysis": {
+          "phase1Pass": false,
+          "phase1Message": "locator.click: Error: strict mode violation: getByRole('button', { name: 'Go' }) resolved to 2 elements:\\n    1) <input value=\\\"Go\\\" tabindex=\\\"0\\\" type=\\\"submit\\\" id=\\\"nav-search-submit-button\\\" class=\\\"nav-input nav-progressive-attribute\\\"/> aka getByRole('button', { name: 'Go', exact: true })\\n    2) <a role=\\\"button\\\" aria-expanded=\\\"false\\\" id=\\\"nav-hamburger-menu\\\" data-csa-c-type=\\\"widget\\\" href=\\\"javascript: void(0)\\\" aria-label=\\\"Open All Categories Menu\\\" data-csa-c-interaction-events=\\\"click\\\" data-csa-c-slot-id=\\\"HamburgerMenuDesktop\\\" data-csa-c-id=\\\"i9q4b0-wczkkc-xbehk6-97a2jh\\\">\u2026</a> aka getByLabel('Open All Categories Menu')\\n\\nCall log:\\n  \\u001b[2m- waiting for getByRole('button', { name: 'Go' })\\u001b[22m\\n\",",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": false,
+          "phase3Message": "Not run (loop did not pass)",
+          "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+        }
+      },
+      "rowIndex": 4,
+      "rowId": "1ea7b0c6",
+      "golden_id": "1facec44"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Search for \"phone\". 3. Select \"Price: Low to High\" sort option. 4. Wait for results refresh. 5. Validate sorting dropdown reflects selected option. 6. Close browser.",
+      "golden_name": "Sort Functionality Regression",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 2: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 16:57",
+        "analysis": {
+          "phase1Pass": true,
+          "phase1Message": "Test executed successfully",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": true,
+          "phase3Message": "Validation passed (no tuning applied)",
+          "recommendation": "\u2705 Ready to save as GOLDEN! All phases passed."
+        }
+      },
+      "rowIndex": 5,
+      "rowId": "aa6a32ce",
+      "golden_id": "63823dbb"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Search for \"backpack\". 3. Open first product. 4. Validate product image is loaded (img not broken). 5. Close browser.",
+      "golden_name": "Product Image Load Check",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 1: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 16:56",
+        "analysis": {
+          "phase1Pass": true,
+          "phase1Message": "Test executed successfully",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": true,
+          "phase3Message": "Validation passed (no tuning applied)",
+          "recommendation": "\u2705 Ready to save as GOLDEN! All phases passed."
+        }
+      },
+      "rowIndex": 6,
+      "rowId": "cab88201",
+      "golden_id": "77ca589a"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Search for \"monitor\". 3. Click first product. 4. Click browser back button. 5. Validate search results page is displayed. 6. Close browser.",
+      "golden_name": "Navigation Back Behaviour",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 1: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 17:00",
+        "analysis": {
+          "phase1Pass": false,
+          "phase1Message": "\\u001b[31mTimed out 10000ms waiting for \\u001b[39m\\u001b[2mexpect(\\u001b[22m\\u001b[31mlocator\\u001b[39m\\u001b[2m).\\u001b[22mtoBeVisible\\u001b[2m()\\u001b[22m\\n\\nLocator: locator('div.s-main-slot div[data-component-type=\\\"s-search-result\\\"]').first().locator('a[href*=\\\"/dp/\\\"]')\\nExpected: visible\\nReceived: <element(s) not found>\\nCall log:\\n  \\u001b[2m- expect.toBeVisible with timeout 10000ms\\u001b[22m\\n\\u001b[2m  - waiting for locator('div.s-main-slot div[data-component-type=\\\"s-search-result\\\"]').first().locator('a[href*=\\\"/dp/\\\"]')\\u001b[22m\\n\",",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": false,
+          "phase3Message": "Not run (loop did not pass)",
+          "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+        }
+      },
+      "rowIndex": 7,
+      "rowId": "8e5c1ab4",
+      "golden_id": "631b159a"
+    },
+    {
+      "test_case": "1. Launch browser \u2192 Amazon SG. 2. Add product to cart. 3. Click cart icon (id=\"nav-cart\"). 4. Validate cart page loads. 5. Close browser.",
+      "golden_name": "Mini Cart Icon Click",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 2: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 16:58",
+        "analysis": {
+          "phase1Pass": false,
+          "phase1Message": "expect.toBeVisible: Error: strict mode violation: getByRole('button', { name: /Add to Cart/i }) resolved to 2 elements:\\n    1) <button role=\\\"button\\\" tabindex=\\\"-1\\\" data-modal-ignore=\\\"\\\" data-behavior=\\\"activate\\\" id=\\\"nav-assist-add-to-cart\\\" data-target=\\\"#add-to-cart-button\\\" data-nav-assist-menu-item-index=\\\"12\\\" aria-label=\\\"Add to cart, shift, Alt, K\\\" aria-describedby=\\\"nav-assist-shortcut-help\\\" class=\\\"nav-assistant-menu-item nav-assistant-link-item nav-assistant-keyboard-shortcut-item keyboard-shortcut-menu-container a-color-base a-color-link nav-assistant-link-button\\\" data-actuators=\\\"[{\\\"eventKey\\\":\\\"\uf8ff\\\",\\\"eventCode\\\":\\\"KeyK\\\",\\\"isShiftReq\u2026>\u2026</button> aka getByLabel('Add to cart, shift, Alt, K')\\n    2) <input data-ref=\\\"\\\" type=\\\"submit\\\" value=\\\"Add to cart\\\" class=\\\"a-button-input\\\" id=\\\"add-to-cart-button\\\" name=\\\"submit.add-to-cart\\\" title=\\\"Add to Shopping Cart\\\" aria-labelledby=\\\"submit.add-to-cart-announce\\\" formaction=\\\"/cart/add-to-cart/ref=dp_start-bbf_1_glance\\\" data-hover=\\\"Select <b>__dims__</b> from the left<br> to add to Shopping Cart\\\"/> aka getByLabel('Add to cart', { exact: true })\\n\\nCall log:\\n  \\u001b[2m- expect.toBeVisible with timeout 15000ms\\u001b[22m\\n\\u001b[2m  - waiting for getByRole('button', { name: /Add to Cart/i })\\u001b[22m\\n\",",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": false,
+          "phase3Message": "Not run (loop did not pass)",
+          "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+        }
+      },
+      "rowIndex": 8,
+      "rowId": "29e6d57d",
+      "golden_id": "cc1a8600"
+    },
+    {
+      "test_case": "1. Launch browser.\n2. Navigate to https://www.amazon.sg.\n3. Wait for input[name=\"field-keywords\"] to be visible.\n4. Fill input[name=\"field-keywords\"] with \"Magic Tree House Boxed Set\".\n5. Press Enter key in input[name=\"field-keywords\"] to submit the search.\n6. Wait for search results to load and for the first product link (e.g., .s-search-results .s-result-item h2 a) to be visible.\n7. Click on the first product link in the search results.\n8. Wait for the product detail page to load and for the product title (id=\"productTitle\") to be visible.\n9. Read the text content of the product title element (id=\"productTitle\").\n10. Read the text content of the product price element (e.g., id=\"priceblock_ourprice\" or id=\"priceblock_dealprice\" or .a-price .a-offscreen).\n11. Parse the price value as a number.\n12. Validate that the price value is less than 25.\n13. If validation passes, click the \"Add to Cart\" button (id=\"add-to-cart-button\").\n14. Wait for either a cart confirmation message (e.g., #huc-v2-order-row-confirm-text) to appear OR for the cart count element (id=\"nav-cart-count\") to update and increase by 1.\n15. Close the browser.",
+      "golden_name": "Amazon SG search and add to cart with price guard",
+      "browser": "",
+      "status": "ready",
+      "workflowStatus": "pending",
+      "result": {
+        "message": "Worker 2: golden generated",
+        "conclusion": "generated",
+        "created_at": "2026-06-10 17:01",
+        "analysis": {
+          "phase1Pass": false,
+          "phase1Message": "\\u001b[2mexpect(\\u001b[22m\\u001b[31mreceived\\u001b[39m\\u001b[2m).\\u001b[22mtoBeLessThan\\u001b[2m(\\u001b[22m\\u001b[32mexpected\\u001b[39m\\u001b[2m)\\u001b[22m\\n\\nExpected: < \\u001b[32m25\\u001b[39m\\nReceived:   \\u001b[31m41.97\\u001b[39m\",",
+          "phase2Updated": false,
+          "phase2Changes": [],
+          "phase3Pass": false,
+          "phase3Message": "Not run (loop did not pass)",
+          "recommendation": "\u26a0\ufe0f  Fix Phase 1 issues before saving as golden"
+        }
+      },
+      "rowIndex": 9,
+      "rowId": "e220b65b",
+      "golden_id": "71875af5"
+    }
+  ],
+  "workers": 2,
+  "error": "422: GitHub API error: Unexpected inputs provided: [\"batch_id\"]"
+}

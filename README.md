@@ -68,9 +68,13 @@ Golden files are never silently modified. The only way a golden changes is if yo
 
 ---
 
-### ▶ Run History
+### 📥 Batch Regression
 
-Shows results from GitHub Actions CI runs — pass/fail per step, duration, error messages.
+Upload an Excel workbook with rows of test cases and golden targets, then dispatch the batch to GitHub for execution. Use the batch upload list to monitor batches, download result spreadsheets, and re-dispatch failed batch runs.
+
+---
+
+### ▶ Run History
 
 - Results sync automatically when you open the tab
 - Click **↺ Refresh from GitHub** to pull the latest
