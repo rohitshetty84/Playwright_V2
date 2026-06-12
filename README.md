@@ -1,4 +1,4 @@
-# Playwright AI Studio
+# TestMind
 
 AI-powered browser automation tool. Describe a test in plain English, watch it drive a real browser step-by-step, then promote the verified result as a golden test file that runs in CI.
 
