@@ -44,6 +44,8 @@ jobs:
   explore:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write   # needed to commit the reference file back to the repo
 
     steps:
       - name: Checkout
@@ -114,6 +116,32 @@ jobs:
           # ── Studio callback auth ───────────────────────────────────────────
           STUDIO_CALLBACK_TOKEN: ${{ secrets.STUDIO_CALLBACK_TOKEN }}
         run: python scripts/explore_runner.py
+
+      - name: Generate exploration reference
+        if: ${{ !cancelled() }}
+        env:
+          EXPLORATION_ID: ${{ inputs.exploration_id }}
+        run: python scripts/publish_exploration_reference.py
+
+      - name: Commit reference to repository
+        if: ${{ !cancelled() }}
+        env:
+          EXPLORATION_ID: ${{ inputs.exploration_id }}
+          GITHUB_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REF_FILE="explorations/${{ inputs.exploration_id }}/reference.html"
+          if [ ! -f "$REF_FILE" ]; then
+            echo "[reference] No reference file generated — skipping commit"
+            exit 0
+          fi
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}"
+          git add "$REF_FILE"
+          git diff --cached --quiet && { echo "[reference] Nothing to commit"; exit 0; }
+          git commit -m "ref: exploration ${{ inputs.exploration_id }}"
+          git push
+          echo "[reference] Reference committed → ${REF_FILE}"
 
       - name: Upload exploration artifacts
         if: always()
